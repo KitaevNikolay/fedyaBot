@@ -69,6 +69,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     this.botToken = token;
     this.bot = new Bot<Context>(token);
+    const webhookUrl = this.configService.get<string>('TELEGRAM_WEBHOOK_URL');
     const startCommand =
       this.constantsService.get<string>('commands.start') ?? 'start';
     const cancelCommand =
@@ -435,11 +436,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to set bot commands: ${error}`);
     }
 
-    void this.bot.start({
-      onStart: (botInfo) => {
-        this.logger.log(`Telegram bot started as ${botInfo.username}`);
-      },
-    });
+    if (webhookUrl) {
+      await this.bot.api.setWebhook(webhookUrl);
+      this.logger.log('Telegram webhook set');
+    } else {
+      void this.bot.start({
+        onStart: (botInfo) => {
+          this.logger.log(`Telegram bot started as ${botInfo.username}`);
+        },
+      });
+    }
 
     this.uniquenessInterval = setInterval(() => {
       void this.processUniquenessChecks();
@@ -466,6 +472,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (this.bot) {
       await this.bot.stop();
     }
+  }
+
+  getBot(): Bot<Context> {
+    if (!this.bot) {
+      throw new Error('Bot is not initialized');
+    }
+    return this.bot;
   }
 
   // Redis helpers
