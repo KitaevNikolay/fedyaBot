@@ -10,12 +10,6 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const appLogger = app.get(AppLoggerService);
   const configService = app.get(ConfigService);
-  const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
-  if (webhookUrl) {
-    const webhookPath = new URL(webhookUrl).pathname;
-    const botService = app.get(BotService);
-    app.use(webhookPath, webhookCallback(botService.getBot(), 'express'));
-  }
   process.on('unhandledRejection', (reason) => {
     void appLogger.log({
       type: 'process_error',
@@ -37,6 +31,13 @@ async function bootstrap() {
       whitelist: true,
     }),
   );
+  await app.init();
+  const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
+  if (webhookUrl) {
+    const webhookPath = new URL(webhookUrl).pathname;
+    const botService = app.get(BotService);
+    app.use(webhookPath, webhookCallback(botService.getBot(), 'express'));
+  }
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
