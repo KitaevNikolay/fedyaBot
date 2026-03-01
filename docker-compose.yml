@@ -14,7 +14,7 @@ services:
     ports:
       - "7000:3000"
     volumes:
-      - logs_data:/app/logs
+      - ./logs:/app/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -33,4 +33,3 @@ services:
 
 volumes:
   redis_data:
-  logs_data:
