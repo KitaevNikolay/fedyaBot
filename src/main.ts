@@ -31,15 +31,19 @@ async function bootstrap() {
       whitelist: true,
     }),
   );
-  await app.init();
   const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
-    const botService = app.get(BotService);
-    const httpAdapter = app.getHttpAdapter();
-    const instance = httpAdapter.getInstance();
-    instance.use(webhookPath, webhookCallback(botService.getBot(), 'express'));
+    let handler: ReturnType<typeof webhookCallback> | null = null;
+    app.use(webhookPath, (...args) => {
+      if (!handler) {
+        const botService = app.get(BotService);
+        handler = webhookCallback(botService.getBot(), 'express');
+      }
+      return handler(...args);
+    });
   }
+  await app.init();
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
