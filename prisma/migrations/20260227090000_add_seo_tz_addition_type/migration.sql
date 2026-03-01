@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `ArticleAddition` MODIFY `type` ENUM('QUESTION', 'ARTICLE', 'FACT_CHECK', 'RUBRIC', 'PRODUCT', 'SEO_TZ') NOT NULL;

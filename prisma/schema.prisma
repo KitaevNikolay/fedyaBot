@@ -1,0 +1,128 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String    @id @default(uuid())
+  telegramId String    @unique
+  isActive   Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  firstName  String?
+  lastName   String?
+  username   String?
+  role       String    @default("user")
+  bitrixId   Int?
+  articles   Article[]
+  sessions   Session[]
+}
+
+model Session {
+  id         String   @id @default(uuid())
+  userId     String
+  scenarioId String?
+  articleId  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@index([userId], map: "Session_userId_fkey")
+}
+
+model Scenario {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+}
+
+model Article {
+  id                 String                     @id @default(uuid())
+  userId             String
+  title              String                     @db.Text
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  user               User                       @relation(fields: [userId], references: [id])
+  additions          ArticleAddition[]
+  versions           ArticleVersion[]
+  technicalAdditions TechnicalArticleAddition[]
+
+  @@index([userId], map: "Article_userId_fkey")
+}
+
+model ArticleAddition {
+  id        String              @id @default(uuid())
+  articleId String
+  type      ArticleAdditionType
+  content   String              @db.LongText
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  article   Article             @relation(fields: [articleId], references: [id])
+
+  @@index([articleId], map: "ArticleAddition_articleId_fkey")
+}
+
+model TechnicalArticleAddition {
+  id            String                        @id @default(uuid())
+  articleId     String
+  state         TechnicalArticleAdditionState
+  message       String?                       @db.LongText
+  tries         Int                           @default(0)
+  technicalInfo String?                       @db.LongText
+  createdAt     DateTime                      @default(now())
+  updatedAt     DateTime                      @updatedAt
+  article       Article                       @relation(fields: [articleId], references: [id])
+
+  @@index([articleId], map: "TechnicalArticleAddition_articleId_fkey")
+  @@index([state], map: "TechnicalArticleAddition_state_idx")
+  @@map("TechnicalArticleAdditions")
+}
+
+model ArticleVersion {
+  id        String   @id @default(uuid())
+  articleId String
+  iteration Int
+  content   String   @db.LongText
+  createdAt DateTime @default(now())
+  article   Article  @relation(fields: [articleId], references: [id])
+
+  @@index([articleId], map: "ArticleVersion_articleId_fkey")
+}
+
+model GenerationSettings {
+  id             String   @id @default(uuid())
+  type           String   @unique
+  model          String
+  temperature    Float
+  maxTokens      Int
+  files          String   @db.LongText
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  systemPromptId String?
+  userPromptId   String?
+}
+
+enum ArticleAdditionType {
+  QUESTION
+  ARTICLE
+  FACT_CHECK
+  RUBRIC
+  PRODUCT
+  SEO_TZ
+  ARTICLE_UNIQ_CHECK
+  BITRIX_TASK
+}
+
+enum TechnicalArticleAdditionState {
+  NEW
+  RUNNING
+  PENDING
+  FINISHED
+  ERROR
+}

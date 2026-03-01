@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fedyabot-app:latest
+    container_name: fedyabot-app
+    restart: always
+    env_file:
+      - .env.prod
+    # For connecting to external DB/Nginx on host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "3000:3000"
+    volumes:
+      - logs_data:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7.2.4-alpine
+    container_name: fedyabot-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+  logs_data:
