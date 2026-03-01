@@ -36,7 +36,9 @@ async function bootstrap() {
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
     const botService = app.get(BotService);
-    app.use(webhookPath, webhookCallback(botService.getBot(), 'express'));
+    const httpAdapter = app.getHttpAdapter();
+    const instance = httpAdapter.getInstance();
+    instance.use(webhookPath, webhookCallback(botService.getBot(), 'express'));
   }
   await app.listen(process.env.PORT ?? 3000);
 }
