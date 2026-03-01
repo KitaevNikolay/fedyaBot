@@ -12,7 +12,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "3000:3000"
+      - "7000:3000"
     volumes:
       - logs_data:/app/logs
     depends_on:
