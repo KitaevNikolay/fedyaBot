@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { webhookCallback } from 'grammy';
+import { json } from 'express';
 import { AppModule } from './app.module';
 import { AppLoggerService } from './common/logger/app-logger.service';
 import { BotService } from './modules/bot/bot.service';
@@ -34,8 +35,9 @@ async function bootstrap() {
   const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
+    const jsonParser = json();
     let handler: ReturnType<typeof webhookCallback> | null = null;
-    app.use(webhookPath, (...args) => {
+    app.use(webhookPath, jsonParser, (...args) => {
       if (!handler) {
         const botService = app.get(BotService);
         handler = webhookCallback(botService.getBot(), 'express');
