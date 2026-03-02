@@ -42,7 +42,10 @@ async function bootstrap() {
       next?: NextFunction,
     ) => unknown;
     let handler: WebhookHandler | null = null;
-    app.use(webhookPath, jsonParser, (req, res, next) => {
+    app.use(
+      webhookPath,
+      jsonParser,
+      (req: Request, res: Response, next: NextFunction) => {
       if (!handler) {
         const botService = app.get(BotService);
         handler = webhookCallback(
@@ -51,7 +54,8 @@ async function bootstrap() {
         ) as WebhookHandler;
       }
       return handler(req, res, next);
-    });
+      },
+    );
   }
   await app.init();
   await app.listen(process.env.PORT ?? 3000);
