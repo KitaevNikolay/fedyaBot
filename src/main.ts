@@ -2,7 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { webhookCallback } from 'grammy';
-import { json } from 'express';
+import { json, NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { AppLoggerService } from './common/logger/app-logger.service';
 import { BotService } from './modules/bot/bot.service';
@@ -36,13 +36,21 @@ async function bootstrap() {
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
     const jsonParser = json();
-    let handler: ReturnType<typeof webhookCallback> | null = null;
-    app.use(webhookPath, jsonParser, (...args) => {
+    type WebhookHandler = (
+      req: Request,
+      res: Response,
+      next?: NextFunction,
+    ) => unknown;
+    let handler: WebhookHandler | null = null;
+    app.use(webhookPath, jsonParser, (req, res, next) => {
       if (!handler) {
         const botService = app.get(BotService);
-        handler = webhookCallback(botService.getBot(), 'express');
+        handler = webhookCallback(
+          botService.getBot(),
+          'express',
+        ) as WebhookHandler;
       }
-      return handler(...args);
+      return handler(req, res, next);
     });
   }
   await app.init();
