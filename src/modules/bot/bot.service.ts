@@ -78,6 +78,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.constantsService.get<string>('commands.menu') ?? 'menu';
 
     this.bot.use(async (ctx, next) => {
+      // Deduplication to prevent multiple processing of the same update (e.g. on webhook retries)
+      const updateId = ctx.update.update_id.toString();
+      const lockKey = `update_lock:${updateId}`;
+      const isLocked = await this.redisService.get(lockKey);
+      if (isLocked) {
+        this.logger.log(`Update ${updateId} is already being processed, skipping`);
+        return;
+      }
+      await this.redisService.set(lockKey, '1', 60);
+
       const userContext = this.getUserLogContext(ctx);
       if (ctx.callbackQuery?.data) {
         await this.appLogger.log({

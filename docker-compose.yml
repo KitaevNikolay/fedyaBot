@@ -11,6 +11,8 @@ services:
     # For connecting to external DB/Nginx on host
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "outline.rilokobotfactory3.ru:host-gateway"
+      - "fedyabot.rilokobotfactory3.ru:host-gateway"
     ports:
       - "7000:3000"
     volumes:
