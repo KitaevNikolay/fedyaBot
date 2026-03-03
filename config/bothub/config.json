@@ -1,0 +1,17 @@
+{
+  "api": {
+    "url": "https://bothub.chat/api/v2/openai/v1/chat/completions",
+    "model": "gpt-4o",
+    "temperature": 0.7,
+    "max_tokens": 4096
+  },
+  "prompts": {
+    "generate_questions": "Сгенерируй вопросы для статьи на тему: {{article_subject}}. Сегодняшняя дата: {{today}}.",
+    "generate_article": "Напиши статью на тему: {{article_subject}}, используя следующие ответы на вопросы: {{questions_content}}. Текущая дата: {{current_date}}.",
+    "generate_fact_check": "Проверь факты в статье на тему: {{article_subject}}. Контент статьи: {{ARTICLE.content}}. Текущая дата: {{current_date}}.",
+    "rewrite_article": "Перепиши статью на тему: {{article_subject}}. Оригинальный контент: {{ARTICLE.content}}. Результаты проверки фактов: {{FACT_CHECK.content}}.",
+    "seo_rewrite_article": "Выполни SEO-переписывание статьи. Контент статьи: {{ARTICLE.content}}. ТЗ по SEO: {{SEO_TZ.content}}.",
+    "generate_rubrics": "Сгенерируй рубрики для статьи. Контент статьи: {{ARTICLE.content}}.",
+    "generate_products": "Сгенерируй продукты для статьи. Контент статьи: {{ARTICLE.content}}."
+  }
+}

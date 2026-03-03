@@ -30,6 +30,8 @@ interface BothubConfig {
     seo_rewrite_article: string;
     generate_rubrics: string;
     generate_products: string;
+    article_uniqueness: string;
+    uniq_prompt: string;
   };
   article_settings?: ArticleSettings;
   fact_check_settings?: ArticleSettings;
@@ -41,6 +43,8 @@ interface BothubConfig {
 export interface GenerationResult {
   content: string;
   usage?: number;
+  mockSystemPrompt?: string;
+  mockUserPrompt?: string;
 }
 
 interface BothubResponse {
@@ -119,6 +123,15 @@ export class BothubService {
       .replace(/{{\s*article_subject\s*}}/g, articleSubject)
       .replace(/{{\s*today\s*}}/g, today);
 
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: generate_questions]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
@@ -141,6 +154,15 @@ export class BothubService {
       .replace(/{{\s*questions_content\s*}}/g, questionsContent)
       .replace(/{{\s*current_date\s*}}/g, today);
 
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: generate_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
@@ -161,6 +183,15 @@ export class BothubService {
     const prompt = prompts.user
       .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
       .replace(/{{\s*current_date\s*}}/g, today);
+
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: generate_fact_check]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
 
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
@@ -184,6 +215,15 @@ export class BothubService {
       .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
       .replace(/{{\s*FACT_CHECK\.content\s*}}/g, factCheckContent);
 
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: rewrite_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
@@ -203,6 +243,15 @@ export class BothubService {
     const prompt = prompts.user
       .replace(/{{\s*SEO_TZ\.content\s*}}/g, seoTzContent)
       .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent);
+
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: seo_rewrite_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
 
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
@@ -224,6 +273,15 @@ export class BothubService {
       articleContent,
     );
 
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: generate_rubrics]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
@@ -243,6 +301,73 @@ export class BothubService {
       /{{\s*ARTICLE\.content\s*}}/g,
       articleContent,
     );
+
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: generate_products]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
+    return this.sendRequest(prompt, settings, prompts.system, userContext);
+  }
+
+  async makeArticleUnique(
+    articleContent: string,
+    userContext?: Record<string, unknown>,
+  ): Promise<GenerationResult> {
+    const settings = await this.getGenerationSettings('article_uniqueness');
+    const prompts = await this.getPrompts(
+      'article_uniqueness',
+      settings?.systemPromptId ?? null,
+      settings?.userPromptId ?? null,
+      userContext,
+    );
+
+    const prompt = prompts.user.replace(
+      /{{\s*ARTICLE\.content\s*}}/g,
+      articleContent,
+    );
+
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: article_uniqueness]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
+
+    return this.sendRequest(prompt, settings, prompts.system, userContext);
+  }
+
+  async processUserPrompt(
+    articleContent: string,
+    userPrompt: string,
+    userContext?: Record<string, unknown>,
+  ): Promise<GenerationResult> {
+    const settings = await this.getGenerationSettings('uniq_prompt');
+    const prompts = await this.getPrompts(
+      'uniq_prompt',
+      settings?.systemPromptId ?? null,
+      settings?.userPromptId ?? null,
+      userContext,
+    );
+
+    const prompt = prompts.user
+      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
+      .replace(/{{\s*USER_PROMPT\.content\s*}}/g, userPrompt);
+
+    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
+      return {
+        content: `[MOCK РЕЖИМ: uniq_prompt]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
+        usage: 0,
+        mockSystemPrompt: prompts.system || undefined,
+        mockUserPrompt: prompt,
+      };
+    }
 
     return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
@@ -592,6 +717,28 @@ export class BothubService {
           userPromptId: null,
         };
       }
+    }
+
+    if (type === 'article_uniqueness') {
+      return {
+        model: this.config.api.model,
+        temperature: this.config.api.temperature,
+        maxTokens: this.config.api.max_tokens,
+        files: [],
+        systemPromptId: null,
+        userPromptId: null,
+      };
+    }
+
+    if (type === 'uniq_prompt') {
+      return {
+        model: this.config.api.model,
+        temperature: this.config.api.temperature,
+        maxTokens: this.config.api.max_tokens,
+        files: [],
+        systemPromptId: null,
+        userPromptId: null,
+      };
     }
 
     return null;

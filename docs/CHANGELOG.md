@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0 - 2026-03-02
+
+### Added
+- **Webhooks**: Переход с Polling на Webhooks для Telegram Bot API (повышение стабильности и скорости).
+- **Idempotency (Deduplication)**: Внедрена дедупликация входящих обновлений от Telegram через Redis (атомарный `SET NX`). Предотвращает дублирование сообщений при повторных попытках доставки от Telegram.
+- **Docker Networking**: Добавлена поддержка `extra_hosts` (`host-gateway`) в `docker-compose` для доступа контейнера к локальным сервисам (Outline, Nginx) по доменным именам.
+- **Persistent Logging**: Настроено сохранение логов в директорию `./logs` на хосте через bind mount.
+- **Healthchecks**: Добавлены проверки состояния (healthcheck) для Redis в Docker.
+
+### Changed
+- Логи запросов к Bothub теперь содержат список плейсхолдеров system/user промптов.
+- В версии статей добавлено поле rewrite_type с дефолтным значением "none".
+
+### Fixed
+- Исправлена проблема `connect ETIMEDOUT` при обращении к внутренним API (Outline) из Docker-контейнера.
+- Исправлен порт приложения в Docker: теперь приложение слушает 3000 внутри контейнера, проброс на 7000 (хост).
+- Исправлена ошибка `500 Internal Server Error` на вебхуке (добавлен `express.json()` парсер для маршрута вебхука).
+
 ## 0.5.1 - 2026-03-01
 
 ### Fixed

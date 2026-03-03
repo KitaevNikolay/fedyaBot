@@ -62,6 +62,7 @@
 | articleId | String | ID статьи |
 | iteration | Int | Номер итерации |
 | content | String (LongText) | Содержимое |
+| rewriteType | String | Причина перезаписи (default: none) |
 | createdAt | DateTime | Дата создания |
 
 ### GenerationSettings
@@ -106,6 +107,7 @@
 - SEO_TZ
 - ARTICLE_UNIQ_CHECK
 - BITRIX_TASK
+- USER_PROMPT
 
 ## Миграции
 
@@ -115,3 +117,4 @@
 - Изменен тип поля `title` в модели `Article` на `Text` для поддержки длинных заголовков
 - В Docker используется `prisma migrate deploy` на старте приложения
 - Регулярные бэкапы через `mysqldump` (см. инструкцию в README)
+- В версии статей добавлено поле `rewrite_type` с дефолтом `none`

@@ -15,7 +15,7 @@ import { ConstantsService } from '../../config/constants.service';
 import { LocalesService } from '../../config/locales.service';
 import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { ArticlesService } from '../articles/articles.service';
-import { BothubService } from '../bothub/bothub.service';
+import { BothubService, GenerationResult } from '../bothub/bothub.service';
 import { GenerationSettingsService } from '../generation-settings/generation-settings.service';
 import { RedisService } from '../redis/redis.service';
 import { ScenariosService } from '../scenarios/scenarios.service';
@@ -81,12 +81,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       // Deduplication to prevent multiple processing of the same update (e.g. on webhook retries)
       const updateId = ctx.update.update_id.toString();
       const lockKey = `update_lock:${updateId}`;
-      const isLocked = await this.redisService.get(lockKey);
-      if (isLocked) {
-        this.logger.log(`Update ${updateId} is already being processed, skipping`);
+
+      // Use setnx (set if not exists) for atomic operation
+      const lockAcquired = await this.redisService['redis'].set(
+        lockKey,
+        '1',
+        'EX',
+        60,
+        'NX',
+      );
+
+      if (!lockAcquired) {
+        this.logger.log(
+          `Update ${updateId} is already being processed or finished, skipping`,
+        );
         return;
       }
-      await this.redisService.set(lockKey, '1', 60);
 
       const userContext = this.getUserLogContext(ctx);
       if (ctx.callbackQuery?.data) {
@@ -226,6 +236,29 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const checkUniquenessCallback =
       this.constantsService.get<string>('callbacks.check_uniqueness') ??
       'check_uniqueness';
+    const articleUniquenessCallback =
+      this.constantsService.get<string>('callbacks.article_uniqueness') ??
+      'article_uniqueness';
+    const confirmArticleUniquenessCallback =
+      this.constantsService.get<string>(
+        'callbacks.confirm_article_uniqueness',
+      ) ?? 'confirm_article_uniqueness';
+    const cancelArticleUniquenessCallback =
+      this.constantsService.get<string>(
+        'callbacks.cancel_article_uniqueness',
+      ) ?? 'cancel_article_uniqueness';
+    const userPromptCallback =
+      this.constantsService.get<string>('callbacks.user_prompt') ??
+      'user_prompt';
+    const confirmUserPromptCallback =
+      this.constantsService.get<string>('callbacks.confirm_user_prompt') ??
+      'confirm_user_prompt';
+    const cancelUserPromptCallback =
+      this.constantsService.get<string>('callbacks.cancel_user_prompt') ??
+      'cancel_user_prompt';
+    const uploadArticleCallback =
+      this.constantsService.get<string>('callbacks.upload_article') ??
+      'upload_article';
     const downloadFilesCallback =
       this.constantsService.get<string>('callbacks.download_files') ??
       'download_files';
@@ -363,6 +396,34 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     this.bot.callbackQuery(checkUniquenessCallback, async (ctx) => {
       await this.handleCheckUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(articleUniquenessCallback, async (ctx) => {
+      await this.handleArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(confirmArticleUniquenessCallback, async (ctx) => {
+      await this.handleConfirmArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(cancelArticleUniquenessCallback, async (ctx) => {
+      await this.handleCancelArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(userPromptCallback, async (ctx) => {
+      await this.handleUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(confirmUserPromptCallback, async (ctx) => {
+      await this.handleConfirmUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(cancelUserPromptCallback, async (ctx) => {
+      await this.handleCancelUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(uploadArticleCallback, async (ctx) => {
+      await this.handleUploadArticle(ctx);
     });
 
     this.bot.callbackQuery(downloadFilesCallback, async (ctx) => {
@@ -902,17 +963,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     const keyboard = new InlineKeyboard();
 
-    // Row 1: Create article
+    // Row 1: Create or upload article
     keyboard
       .text(
         this.localesService.t('menu.create_article'),
         this.constantsService.get<string>('callbacks.create_article') ??
           'create_article',
       )
+      .text(
+        this.localesService.t('menu.upload_article') ?? 'Загрузить статью',
+        this.constantsService.get<string>('callbacks.upload_article') ??
+          'upload_article',
+      )
       .row();
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+
     // Row 2: Fact check (if article exists)
-    if (hasArticle) {
+    if (hasArticle || isMockMode) {
       keyboard.text(
         this.localesService.t('menu.fact_check_generation') ??
           'Факт-чек (генерация)',
@@ -920,7 +989,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           'fact_check_generation',
       );
 
-      if (hasFactCheck) {
+      if (hasFactCheck || isMockMode) {
         keyboard.text(
           this.localesService.t('menu.fact_check_rewrite') ??
             'Факт-чек (переписать статью)',
@@ -930,7 +999,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
       keyboard.row();
 
-      if (hasFactCheck) {
+      if (hasFactCheck || isMockMode) {
         keyboard.text(
           this.localesService.t('menu.products') ?? 'Продукты',
           this.constantsService.get<string>('callbacks.products') ?? 'products',
@@ -948,10 +1017,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       keyboard.text(
+        this.localesService.t('menu.article_uniqueness') ??
+          'Уникализация статьи',
+        this.constantsService.get<string>('callbacks.article_uniqueness') ??
+          'article_uniqueness',
+      );
+      keyboard.row();
+
+      keyboard.text(
         this.localesService.t('menu.check_uniqueness') ??
           'Проверить текст на уникальность',
         this.constantsService.get<string>('callbacks.check_uniqueness') ??
           'check_uniqueness',
+      );
+      keyboard.row();
+
+      keyboard.text(
+        this.localesService.t('menu.user_prompt') ?? 'Свободный промпт',
+        this.constantsService.get<string>('callbacks.user_prompt') ??
+          'user_prompt',
       );
       keyboard.row();
 
@@ -962,7 +1046,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       );
       keyboard.row();
 
-      if (hasFactCheck && !hasBitrixTask) {
+      if ((hasFactCheck || isMockMode) && !hasBitrixTask) {
         keyboard.text(
           this.localesService.t('article.create_bitrix_task') ??
             'Создать задачу',
@@ -1157,6 +1241,88 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.handleStart(ctx);
       return;
     }
+
+    if (state === 'WAITING_FOR_USER_PROMPT') {
+      const userPrompt = ctx.message.text;
+      const context = await this.getUserContext(user.id);
+      if (!context || !context.articleId) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+
+      const isMockMode =
+        this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+      const article = await this.articlesService.findById(context.articleId);
+      if (!article && !isMockMode) return;
+
+      const articleAddition = article?.additions.find(
+        (a) => a.type === ArticleAdditionType.ARTICLE,
+      );
+      if (!articleAddition && !isMockMode) {
+        await ctx.reply(this.localesService.t('errors.article_not_found'));
+        return;
+      }
+
+      await ctx.reply(
+        this.localesService.t('article.user_prompt_generating') ??
+          'Генерация статьи по заданному промпту началась...',
+      );
+
+      try {
+        if (article) {
+          await this.articlesService.addAddition(
+            article.id,
+            ArticleAdditionType.USER_PROMPT,
+            userPrompt,
+          );
+        }
+
+        const result = await this.bothubService.processUserPrompt(
+          articleAddition?.content || 'Mock Content',
+          userPrompt,
+          this.getUserLogContext(ctx),
+        );
+
+        await this.sendGenerationResult(ctx, result, 'user_prompt_article');
+
+        await this.setUserContext(user.id, {
+          ...context,
+          articleContent: articleAddition?.content,
+          rewrittenArticleContent: result.content,
+        });
+        await this.setUserState(
+          user.id,
+          'WAITING_FOR_USER_PROMPT_CONFIRMATION',
+        );
+
+        const keyboard = new InlineKeyboard()
+          .text(
+            this.localesService.t('menu.accept') ?? 'Принять статью',
+            this.constantsService.get<string>(
+              'callbacks.confirm_user_prompt',
+            ) ?? 'confirm_user_prompt',
+          )
+          .row()
+          .text(
+            this.localesService.t('menu.cancel') ?? 'Отмена',
+            this.constantsService.get<string>('callbacks.cancel_user_prompt') ??
+              'cancel_user_prompt',
+          );
+
+        await ctx.reply(
+          (
+            this.localesService.t('article.user_prompt_ready') ??
+            'Ознакомьтесь со статьей выше, если согласны с ней, то нажмите "Принять статью", если нет, то "Отмена".\nПотрачено на генерацию: {{usage}}'
+          ).replace('{{usage}}', (result.usage ?? 0).toString()),
+          { reply_markup: keyboard },
+        );
+      } catch (error) {
+        await this.logGenerationError(ctx, 'user_prompt_generation', error);
+        this.logger.error(error);
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+      }
+      return;
+    }
   }
 
   private async handleCancel(ctx: Context) {
@@ -1171,6 +1337,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       state === 'WAITING_FOR_QUESTIONS_FILE' ||
       state === 'WAITING_FOR_FACT_CHECK_FILE' ||
       state === 'WAITING_FOR_SEO_TZ_FILE' ||
+      state === 'WAITING_FOR_ARTICLE_FILE' ||
+      state === 'WAITING_FOR_USER_PROMPT' ||
       state === 'WAITING_FOR_BITRIX_ID'
     ) {
       await this.deleteUserState(user.id);
@@ -1239,9 +1407,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         title,
         this.getUserLogContext(ctx),
       );
-      const buffer = await DocxUtil.createDocx(questionsResult.content);
 
-      await ctx.replyWithDocument(new InputFile(buffer, 'questions.docx'));
+      await this.sendGenerationResult(ctx, questionsResult, 'questions');
 
       // Save context for regeneration/confirmation
       await this.setUserContext(user.id, {
@@ -1280,6 +1447,32 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.logGenerationError(ctx, 'generate_questions', error);
       this.logger.error(error);
       await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async sendGenerationResult(
+    ctx: Context,
+    result: GenerationResult,
+    baseFileName: string,
+  ) {
+    if (result.mockSystemPrompt || result.mockUserPrompt) {
+      if (result.mockSystemPrompt) {
+        const buffer = await DocxUtil.createDocx(result.mockSystemPrompt);
+        await ctx.replyWithDocument(
+          new InputFile(buffer, `${baseFileName}_system.docx`),
+        );
+      }
+      if (result.mockUserPrompt) {
+        const buffer = await DocxUtil.createDocx(result.mockUserPrompt);
+        await ctx.replyWithDocument(
+          new InputFile(buffer, `${baseFileName}_user.docx`),
+        );
+      }
+    } else {
+      const buffer = await DocxUtil.createDocx(result.content);
+      await ctx.replyWithDocument(
+        new InputFile(buffer, `${baseFileName}.docx`),
+      );
     }
   }
 
@@ -1367,9 +1560,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         questions,
         this.getUserLogContext(ctx),
       );
-      const buffer = await DocxUtil.createDocx(articleResult.content);
 
-      await ctx.replyWithDocument(new InputFile(buffer, 'article.docx'));
+      await this.sendGenerationResult(ctx, articleResult, 'article');
 
       await this.setUserContext(userId, {
         ...context,
@@ -1448,13 +1640,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) return;
+    if (!articleAddition && !isMockMode) return;
 
     await ctx.answerCallbackQuery();
     await ctx.reply(
@@ -1464,13 +1658,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.generateFactCheck(
-        article.title,
-        articleAddition.content,
+        article?.title || 'Mock Title',
+        articleAddition?.content || 'Mock Content',
         this.getUserLogContext(ctx),
       );
-      const buffer = await DocxUtil.createDocx(result.content);
 
-      await ctx.replyWithDocument(new InputFile(buffer, 'fact_check.docx'));
+      await this.sendGenerationResult(ctx, result, 'fact_check');
 
       await ctx.reply(
         this.localesService.t('article.fact_check_generated', {
@@ -1478,11 +1671,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         }) || 'Факт-чек сгенерирован.',
       );
 
-      await this.articlesService.addAddition(
-        article.id,
-        ArticleAdditionType.FACT_CHECK,
-        result.content,
-      );
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.FACT_CHECK,
+          result.content,
+        );
+      }
       await this.deleteUserState(user.id);
       await this.deleteUserContext(user.id);
       await this.handleWorkWithArticle(ctx);
@@ -1521,19 +1716,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) return;
+    if (!articleAddition && !isMockMode) return;
 
     // Check if fact check exists
-    const factCheckAddition = article.additions.find(
+    const factCheckAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.FACT_CHECK,
     );
-    if (!factCheckAddition) {
+    if (!factCheckAddition && !isMockMode) {
       await ctx.reply(
         this.localesService.t('errors.fact_check_not_found') ||
           'Сначала сгенерируйте факт-чек.',
@@ -1549,30 +1746,29 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.rewriteArticle(
-        article.title,
-        articleAddition.content,
-        factCheckAddition.content,
+        article?.title || 'Mock Title',
+        articleAddition?.content || 'Mock Content',
+        factCheckAddition?.content || 'Mock Fact Check',
         this.getUserLogContext(ctx),
       );
 
-      // Save old version
-      await this.articlesService.createVersion(
-        article.id,
-        articleAddition.content,
-      );
+      if (article) {
+        // Save old version
+        await this.articlesService.createVersion(
+          article.id,
+          articleAddition?.content || '',
+          'fact_check_rewrite',
+        );
 
-      // Update article content
-      await this.articlesService.updateAddition(
-        article.id,
-        ArticleAdditionType.ARTICLE,
-        result.content,
-      );
+        // Update article content
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.ARTICLE,
+          result.content,
+        );
+      }
 
-      const buffer = await DocxUtil.createDocx(result.content);
-
-      await ctx.replyWithDocument(
-        new InputFile(buffer, 'rewritten_article.docx'),
-      );
+      await this.sendGenerationResult(ctx, result, 'rewritten_article');
 
       await ctx.reply(
         this.localesService.t('article.article_rewritten', {
@@ -1645,7 +1841,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (
       state !== 'WAITING_FOR_QUESTIONS_FILE' &&
       state !== 'WAITING_FOR_FACT_CHECK_FILE' &&
-      state !== 'WAITING_FOR_SEO_TZ_FILE'
+      state !== 'WAITING_FOR_SEO_TZ_FILE' &&
+      state !== 'WAITING_FOR_ARTICLE_FILE'
     ) {
       return;
     }
@@ -1673,6 +1870,65 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.localesService.t('errors.docx_empty') ||
           'Файл пустой. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
       );
+      return;
+    }
+
+    if (state === 'WAITING_FOR_ARTICLE_FILE') {
+      const session = await this.sessionsService.findActive(user.id);
+      if (!session) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+
+      let articleId = session.articleId;
+
+      if (!articleId) {
+        // Create new article if not exists
+        const fileName = document.file_name ?? 'Uploaded Article';
+        const article = await this.articlesService.create(user.id, fileName);
+        articleId = article.id;
+        await this.sessionsService.updateArticle(session.id, articleId);
+
+        await this.articlesService.addAddition(
+          articleId,
+          ArticleAdditionType.ARTICLE,
+          text,
+        );
+      } else {
+        const article = await this.articlesService.findById(articleId);
+        const articleAddition = article?.additions.find(
+          (a) => a.type === ArticleAdditionType.ARTICLE,
+        );
+
+        if (articleAddition) {
+          // Save old version
+          await this.articlesService.createVersion(
+            articleId,
+            articleAddition.content,
+            'upload_article',
+          );
+          // Update current content
+          await this.articlesService.updateAddition(
+            articleId,
+            ArticleAdditionType.ARTICLE,
+            text,
+          );
+        } else {
+          // Add first article addition
+          await this.articlesService.addAddition(
+            articleId,
+            ArticleAdditionType.ARTICLE,
+            text,
+          );
+        }
+      }
+
+      await this.deleteUserState(user.id);
+      await ctx.reply(
+        this.localesService.t('article.upload_article_success') ??
+          'Статья успешно загружена и сохранена.',
+      );
+      await this.handleWorkWithArticle(ctx);
       return;
     }
 
@@ -1719,16 +1975,18 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         'ТЗ получил. Начинаю генерацию текста...',
     );
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(context.articleId);
-    if (!article) {
+    if (!article && !isMockMode) {
       await ctx.reply(this.localesService.t('errors.generation_failed'));
       return;
     }
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.reply(
         this.localesService.t('errors.article_not_found') ||
           'Сначала сгенерируйте статью.',
@@ -1738,23 +1996,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.seoRewriteArticle(
-        articleAddition.content,
+        articleAddition?.content || 'Mock Article Content',
         text,
         this.getUserLogContext(ctx),
       );
 
-      await this.articlesService.createVersion(
-        context.articleId,
-        articleAddition.content,
-      );
-      await this.articlesService.updateAddition(
-        context.articleId,
-        ArticleAdditionType.ARTICLE,
-        result.content,
-      );
+      if (article && articleAddition) {
+        await this.articlesService.createVersion(
+          context.articleId,
+          articleAddition.content,
+          'seo_rewrite',
+        );
+        await this.articlesService.updateAddition(
+          context.articleId,
+          ArticleAdditionType.ARTICLE,
+          result.content,
+        );
+      }
 
-      const buffer = await DocxUtil.createDocx(result.content);
-      await ctx.replyWithDocument(new InputFile(buffer, 'seo_article.docx'));
+      await this.sendGenerationResult(ctx, result, 'seo_article');
 
       await ctx.reply(
         (
@@ -1825,7 +2085,11 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.answerCallbackQuery();
 
     // Move old content to versions
-    await this.articlesService.createVersion(articleId, articleContent);
+    await this.articlesService.createVersion(
+      articleId,
+      articleContent,
+      'rewrite_confirmation',
+    );
 
     // Update current content
     await this.articlesService.updateAddition(
@@ -1839,7 +2103,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await this.handleWorkWithArticle(ctx);
   }
 
-  private async handleSeoOptimization(ctx: Context) {
+  private async handleArticleUniqueness(ctx: Context) {
     const telegramId = ctx.from?.id?.toString();
     if (!telegramId) return;
     const user = await this.usersService.findByTelegramId(telegramId);
@@ -1848,13 +2112,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.answerCallbackQuery({
         text:
           this.localesService.t('errors.article_not_found') ||
@@ -1864,10 +2130,172 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const factCheckAddition = article.additions.find(
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_uniqueness') ||
+        'Уникализирую статью, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.makeArticleUnique(
+        articleAddition?.content || 'Mock Content for Uniqueness',
+        this.getUserLogContext(ctx),
+      );
+
+      await this.sendGenerationResult(ctx, result, 'unique_article');
+
+      await this.setUserContext(user.id, {
+        articleId: article?.id,
+        articleContent: articleAddition?.content,
+        rewrittenArticleContent: result.content,
+      });
+      await this.setUserState(user.id, 'WAITING_FOR_UNIQUENESS_CONFIRMATION');
+
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.accept') ?? 'Принять статью',
+          this.constantsService.get<string>(
+            'callbacks.confirm_article_uniqueness',
+          ) ?? 'confirm_article_uniqueness',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.cancel') ?? 'Отмена',
+          this.constantsService.get<string>(
+            'callbacks.cancel_article_uniqueness',
+          ) ?? 'cancel_article_uniqueness',
+        );
+
+      await ctx.reply(
+        (
+          this.localesService.t('article.uniqueness_ready') ??
+          'Ознакомьтесь со статьей выше, если согласны с ней, то нажмите "Принять статью", если нет, то "Отмена".\nПотрачено на генерацию: {{usage}}'
+        ).replace('{{usage}}', (result.usage ?? 0).toString()),
+        { reply_markup: keyboard },
+      );
+    } catch (error) {
+      await this.logGenerationError(ctx, 'article_uniqueness', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleConfirmArticleUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_UNIQUENESS_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.rewrittenArticleContent ||
+      !context.articleContent
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    // Move old content to versions
+    await this.articlesService.createVersion(
+      context.articleId,
+      context.articleContent,
+      'article_uniqueness_rewrite',
+    );
+
+    // Update current content
+    await this.articlesService.updateAddition(
+      context.articleId,
+      ArticleAdditionType.ARTICLE,
+      context.rewrittenArticleContent,
+    );
+
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.uniqueness_accepted') ??
+        'Статья обновлена и сохранена.',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleCancelArticleUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    await ctx.answerCallbackQuery();
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.uniqueness_cancelled') ??
+        'Уникализация статьи отменена',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleUploadArticle(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session) {
+      // Create session if not exists
+      await this.sessionsService.create(user.id);
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_ARTICLE_FILE');
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.upload_article_request') ??
+        'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
+  }
+
+  private async handleSeoOptimization(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const factCheckAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.FACT_CHECK,
     );
-    if (!factCheckAddition) {
+    if (!factCheckAddition && !isMockMode) {
       await ctx.reply(
         this.localesService.t('errors.fact_check_not_found') ||
           'Сначала сгенерируйте факт-чек.',
@@ -1875,7 +2303,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.setUserContext(user.id, { articleId: article.id });
+    await this.setUserContext(user.id, { articleId: article?.id });
     await this.setUserState(user.id, 'WAITING_FOR_SEO_TZ_FILE');
 
     await ctx.answerCallbackQuery();
@@ -1894,13 +2322,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.answerCallbackQuery({
         text:
           this.localesService.t('errors.article_not_found') ||
@@ -1910,10 +2340,11 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const activeCheck =
-      await this.technicalArticleAdditionsService.findActiveByArticleId(
-        article.id,
-      );
+    const activeCheck = article
+      ? await this.technicalArticleAdditionsService.findActiveByArticleId(
+          article.id,
+        )
+      : null;
     if (activeCheck) {
       await ctx.answerCallbackQuery();
       await ctx.reply(
@@ -1926,21 +2357,23 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.answerCallbackQuery();
     try {
       const textUid = await this.textRuService.createCheck(
-        articleAddition.content,
+        articleAddition?.content || 'Mock Content for Uniqueness',
         this.getUserLogContext(ctx),
       );
-      await this.technicalArticleAdditionsService.create(
-        article.id,
-        TechnicalArticleAdditionState.NEW,
-        JSON.stringify({ textUid }),
-      );
+      if (article) {
+        await this.technicalArticleAdditionsService.create(
+          article.id,
+          TechnicalArticleAdditionState.NEW,
+          JSON.stringify({ textUid }),
+        );
 
-      await this.articlesService.updateAddition(
-        article.id,
-        ArticleAdditionType.ARTICLE_UNIQ_CHECK,
-        this.localesService.t('article_menu.uniqueness_in_progress') ||
-          'Проверка в процессе',
-      );
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.ARTICLE_UNIQ_CHECK,
+          this.localesService.t('article_menu.uniqueness_in_progress') ||
+            'Проверка в процессе',
+        );
+      }
 
       await ctx.reply(
         this.localesService.t('article.uniqueness_check_created') ||
@@ -1954,6 +2387,108 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async handleUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_USER_PROMPT');
+    await this.setUserContext(user.id, { articleId: article?.id });
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.enter_user_prompt') ??
+        'Введите ваш промпт для дополнения статьи:',
+    );
+  }
+
+  private async handleConfirmUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_USER_PROMPT_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.rewrittenArticleContent ||
+      !context.articleContent
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    // Move old content to versions
+    await this.articlesService.createVersion(
+      context.articleId,
+      context.articleContent,
+      'uniq_prompt_rewrite',
+    );
+
+    // Update current content
+    await this.articlesService.updateAddition(
+      context.articleId,
+      ArticleAdditionType.ARTICLE,
+      context.rewrittenArticleContent,
+    );
+
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.user_prompt_accepted') ??
+        'Статья успешно дополнена и сохранена.',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleCancelUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    await ctx.answerCallbackQuery();
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.user_prompt_cancelled') ??
+        'Дополнение статьи отменено',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
   private async handleRubrics(ctx: Context) {
     const telegramId = ctx.from?.id?.toString();
     if (!telegramId) return;
@@ -1963,13 +2498,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.answerCallbackQuery({
         text:
           this.localesService.t('errors.article_not_found') ||
@@ -1987,18 +2524,19 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.generateRubrics(
-        articleAddition.content,
+        articleAddition?.content || 'Mock Content for Rubrics',
         this.getUserLogContext(ctx),
       );
-      const buffer = await DocxUtil.createDocx(result.content);
 
-      await ctx.replyWithDocument(new InputFile(buffer, 'rubrics.docx'));
+      await this.sendGenerationResult(ctx, result, 'rubrics');
 
-      await this.articlesService.addAddition(
-        article.id,
-        ArticleAdditionType.RUBRIC,
-        result.content,
-      );
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.RUBRIC,
+          result.content,
+        );
+      }
 
       await ctx.reply(
         (
@@ -2025,13 +2563,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.answerCallbackQuery({
         text:
           this.localesService.t('errors.article_not_found') ||
@@ -2049,18 +2589,19 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.generateProducts(
-        articleAddition.content,
+        articleAddition?.content || 'Mock Content for Products',
         this.getUserLogContext(ctx),
       );
-      const buffer = await DocxUtil.createDocx(result.content);
 
-      await ctx.replyWithDocument(new InputFile(buffer, 'products.docx'));
+      await this.sendGenerationResult(ctx, result, 'products');
 
-      await this.articlesService.addAddition(
-        article.id,
-        ArticleAdditionType.PRODUCT,
-        result.content,
-      );
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.PRODUCT,
+          result.content,
+        );
+      }
 
       await ctx.reply(
         this.localesService.t('article.products_generated', {
@@ -2436,8 +2977,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
     const downloadPrefix =
       this.constantsService.get<string>('callbacks.download_prefix') ??
@@ -2478,8 +3021,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     let hasFiles = false;
 
     for (const option of options) {
-      const addition = article.additions.find((a) => a.type === option.type);
-      if (!addition) continue;
+      const addition = article?.additions.find((a) => a.type === option.type);
+      if (!addition && !isMockMode) continue;
       hasFiles = true;
       keyboard.text(
         this.localesService.t(option.labelKey) ?? option.fallback,
@@ -2520,8 +3063,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const article = await this.articlesService.findById(session.articleId);
-    if (!article) return;
+    if (!article && !isMockMode) return;
 
     const callbackData = ctx.callbackQuery?.data ?? '';
     const downloadPrefix =
@@ -2545,10 +3090,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const addition = article.additions.find(
+    const addition = article?.additions.find(
       (a) => a.type === (type as ArticleAdditionType),
     );
-    if (!addition) {
+    if (!addition && !isMockMode) {
       await ctx.reply(
         this.localesService.t('download_menu.no_files') ||
           'Для этой статьи пока нет файлов.',
@@ -2564,7 +3109,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       [ArticleAdditionType.QUESTION]: 'questions.docx',
     };
 
-    const buffer = await DocxUtil.createDocx(addition.content);
+    const content = addition?.content || `Mock content for ${type}`;
+    const buffer = await DocxUtil.createDocx(content);
     await ctx.replyWithDocument(
       new InputFile(buffer, fileNameMap[type] ?? 'content.docx'),
     );
@@ -2591,24 +3137,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const session = await this.sessionsService.findActive(user.id);
     if (!session || !session.articleId || !session.scenarioId) return;
 
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
     const scenario = await this.scenariosService.findById(session.scenarioId);
     const article = await this.articlesService.findById(session.articleId);
-    if (!scenario || !article) return;
+    if ((!scenario || !article) && !isMockMode) return;
 
-    const articleAddition = article.additions.find(
+    const articleAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE,
     );
-    const uniqAddition = article.additions.find(
+    const uniqAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.ARTICLE_UNIQ_CHECK,
     );
-    const rubricAddition = article.additions.find(
+    const rubricAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.RUBRIC,
     );
-    const productAddition = article.additions.find(
+    const productAddition = article?.additions.find(
       (a) => a.type === ArticleAdditionType.PRODUCT,
     );
 
-    if (!articleAddition) {
+    if (!articleAddition && !isMockMode) {
       await ctx.answerCallbackQuery({
         text: this.localesService.t('errors.article_not_found'),
         show_alert: true,
@@ -2620,8 +3168,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.reply(this.localesService.t('article.bitrix_task_creating'));
 
     const uniqueness = uniqAddition?.content ? uniqAddition.content : '0';
-    const title = `${scenario.name} статья на размещение ${article.title}`;
-    const description = `Разместить статью. Тема: ${article.title}. Уникальность: ${uniqueness}%. Вся необходимая информация находится во вложениях к задаче`;
+    const articleTitle = article?.title || 'Mock Article Title';
+    const scenarioName = scenario?.name || 'Mock Scenario';
+    const title = `${scenarioName} статья на размещение ${articleTitle}`;
+    const description = `Разместить статью. Тема: ${articleTitle}. Уникальность: ${uniqueness}%. Вся необходимая информация находится во вложениях к задаче`;
 
     try {
       const taskId = await this.bitrixService.createTask({
@@ -2632,25 +3182,33 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       });
 
       // Save task ID to DB
-      await this.articlesService.updateAddition(
-        article.id,
-        ArticleAdditionType.BITRIX_TASK,
-        taskId.toString(),
-      );
+      if (article) {
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.BITRIX_TASK,
+          taskId.toString(),
+        );
+      }
 
       // Prepare files for Bitrix
       const filesToUpload: Array<{ name: string; content: string }> = [];
 
       // Article
-      const articleBuffer = await DocxUtil.createDocx(articleAddition.content);
-      filesToUpload.push({
-        name: 'article.docx',
-        content: articleBuffer.toString('base64'),
-      });
+      if (articleAddition || isMockMode) {
+        const articleBuffer = await DocxUtil.createDocx(
+          articleAddition?.content || 'Mock Article Content',
+        );
+        filesToUpload.push({
+          name: 'article.docx',
+          content: articleBuffer.toString('base64'),
+        });
+      }
 
       // Rubrics
-      if (rubricAddition) {
-        const rubricBuffer = await DocxUtil.createDocx(rubricAddition.content);
+      if (rubricAddition || isMockMode) {
+        const rubricBuffer = await DocxUtil.createDocx(
+          rubricAddition?.content || 'Mock Rubrics Content',
+        );
         filesToUpload.push({
           name: 'rubrics.docx',
           content: rubricBuffer.toString('base64'),
@@ -2658,8 +3216,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Products
-      if (productAddition) {
-        const productBuffer = await DocxUtil.createDocx(productAddition.content);
+      if (productAddition || isMockMode) {
+        const productBuffer = await DocxUtil.createDocx(
+          productAddition?.content || 'Mock Products Content',
+        );
         filesToUpload.push({
           name: 'products.docx',
           content: productBuffer.toString('base64'),
@@ -2674,7 +3234,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       );
 
       const taskUrl = this.bitrixService.generateTaskUrl(taskId);
-      await ctx.reply(this.localesService.t('article.bitrix_task_created', { taskUrl }));
+      await ctx.reply(
+        this.localesService.t('article.bitrix_task_created', { taskUrl }),
+      );
 
       // Finish cycle
       await this.sessionsService.delete(session.id);

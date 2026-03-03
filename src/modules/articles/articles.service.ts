@@ -55,7 +55,11 @@ export class ArticlesService {
     return this.addAddition(articleId, type, content);
   }
 
-  async createVersion(articleId: string, content: string) {
+  async createVersion(
+    articleId: string,
+    content: string,
+    rewriteType?: string | null,
+  ) {
     const count = await this.prisma.articleVersion.count({
       where: { articleId },
     });
@@ -65,6 +69,7 @@ export class ArticlesService {
         articleId,
         content,
         iteration: count + 1,
+        rewriteType: rewriteType ?? 'none',
       },
     });
   }

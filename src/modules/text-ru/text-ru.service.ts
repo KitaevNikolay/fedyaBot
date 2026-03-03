@@ -25,7 +25,9 @@ export class TextRuService {
   ) {
     const key = this.configService.get<string>('TEXT_RU_API_KEY');
     if (!key) {
-      this.logger.warn('TEXT_RU_API_KEY is missing. Uniqueness check will not work.');
+      this.logger.warn(
+        'TEXT_RU_API_KEY is missing. Uniqueness check will not work.',
+      );
     }
     this.userKey = key || '';
   }

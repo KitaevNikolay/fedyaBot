@@ -31,7 +31,14 @@ export class BitrixService {
   }): Promise<number> {
     const { title, description, createdBy, userContext } = payload;
 
-    const fields: any = {
+    const fields: {
+      TITLE: string;
+      DESCRIPTION: string;
+      RESPONSIBLE_ID: number;
+      AUDITORS: number[];
+      GROUP_ID: number;
+      CREATED_BY?: number;
+    } = {
       TITLE: title,
       DESCRIPTION: description,
       RESPONSIBLE_ID: this.defaultResponsibleId,
@@ -55,7 +62,10 @@ export class BitrixService {
     });
 
     try {
-      const response$ = this.httpService.post(url, { fields });
+      const response$ = this.httpService.post<{
+        result?: { task?: { id?: string | number } };
+        error_description?: string;
+      }>(url, { fields });
       const response = await lastValueFrom(response$);
 
       await this.appLogger.log({
@@ -68,8 +78,9 @@ export class BitrixService {
         ...userContext,
       });
 
-      if (response.data?.result?.task?.id) {
-        return parseInt(response.data.result.task.id, 10);
+      const taskId = response.data?.result?.task?.id;
+      if (taskId !== undefined && taskId !== null) {
+        return Number(taskId);
       }
 
       throw new Error(
@@ -121,7 +132,9 @@ export class BitrixService {
           ...userContext,
         });
       } catch (error) {
-        this.logger.error(`Error uploading file ${file.name} to task ${taskId}: ${error}`);
+        this.logger.error(
+          `Error uploading file ${file.name} to task ${taskId}: ${error}`,
+        );
         // Не выбрасываем ошибку, чтобы процесс продолжался
       }
     }

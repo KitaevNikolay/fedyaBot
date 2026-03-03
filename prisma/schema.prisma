@@ -85,12 +85,13 @@ model TechnicalArticleAddition {
 }
 
 model ArticleVersion {
-  id        String   @id @default(uuid())
-  articleId String
-  iteration Int
-  content   String   @db.LongText
-  createdAt DateTime @default(now())
-  article   Article  @relation(fields: [articleId], references: [id])
+  id          String   @id @default(uuid())
+  articleId   String
+  iteration   Int
+  content     String   @db.LongText
+  rewriteType String   @default("none") @map("rewrite_type")
+  createdAt   DateTime @default(now())
+  article     Article  @relation(fields: [articleId], references: [id])
 
   @@index([articleId], map: "ArticleVersion_articleId_fkey")
 }
@@ -117,6 +118,7 @@ enum ArticleAdditionType {
   SEO_TZ
   ARTICLE_UNIQ_CHECK
   BITRIX_TASK
+  USER_PROMPT
 }
 
 enum TechnicalArticleAdditionState {

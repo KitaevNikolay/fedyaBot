@@ -29,6 +29,7 @@ Telegram-бот на NestJS для взаимодействия с AI-вендо
 Все пользовательские действия и внешние запросы логируются в файл, заданный переменной LOG_FILE_PATH.
 В Docker dev логи доступны на хосте в папке ./logs.
 Ошибки генерации пишутся в этот же лог с типом generation_error.
+В логах Bothub фиксируются используемые плейсхолдеры system/user промптов.
 
 ## Пользователи
 
@@ -72,7 +73,7 @@ docker-compose --env-file .env.dev -f docker-compose.dev.yml up --build
 
 ## Бэкап базы данных
 
-Для создания бэкапа MySQL из Docker контейнера:
+Для создания бэкапа MySQL из Docker контейнера (перед миграциями Prisma):
 
 ```bash
 docker exec fedyabot-db-1 mysqldump --no-tablespaces -u fedya -pfedya fedya > backup_$(date +%Y%m%d_%H%M%S).sql

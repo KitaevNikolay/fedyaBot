@@ -46,14 +46,14 @@ async function bootstrap() {
       webhookPath,
       jsonParser,
       (req: Request, res: Response, next: NextFunction) => {
-      if (!handler) {
-        const botService = app.get(BotService);
-        handler = webhookCallback(
-          botService.getBot(),
-          'express',
-        ) as WebhookHandler;
-      }
-      return handler(req, res, next);
+        if (!handler) {
+          const botService = app.get(BotService);
+          handler = webhookCallback(
+            botService.getBot(),
+            'express',
+          ) as WebhookHandler;
+        }
+        return handler(req, res, next);
       },
     );
   }
