@@ -73,4 +73,18 @@ export class ArticlesService {
       },
     });
   }
+
+  async updateVersion(id: string, content: string) {
+    return this.prisma.articleVersion.update({
+      where: { id },
+      data: { content },
+    });
+  }
+
+  async updateTitle(id: string, title: string) {
+    return this.prisma.article.update({
+      where: { id },
+      data: { title },
+    });
+  }
 }

@@ -27,6 +27,7 @@ import { UsersService } from '../users/users.service';
 
 type UserContext = {
   title?: string;
+  sameTitle?: boolean;
   articleId?: string;
   questions?: string;
   articleContent?: string;
@@ -1226,6 +1227,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (state === 'WAITING_FOR_UPLOAD_TOPIC') {
+      const text = ctx.message.text;
+      if (text === '/same') {
+        await this.setUserContext(user.id, { sameTitle: true });
+      } else {
+        await this.setUserContext(user.id, { title: text });
+      }
+      await this.setUserState(user.id, 'WAITING_FOR_ARTICLE_FILE');
+
+      await ctx.reply(
+        this.localesService.t('article.upload_article_request') ??
+          'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
+
     if (state === 'WAITING_FOR_BITRIX_ID') {
       const bitrixIdStr = ctx.message.text;
       const bitrixId = parseInt(bitrixIdStr, 10);
@@ -1334,6 +1351,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const state = await this.getUserState(user.id);
     if (
       state === 'WAITING_FOR_TOPIC' ||
+      state === 'WAITING_FOR_UPLOAD_TOPIC' ||
       state === 'WAITING_FOR_QUESTIONS_FILE' ||
       state === 'WAITING_FOR_FACT_CHECK_FILE' ||
       state === 'WAITING_FOR_SEO_TZ_FILE' ||
@@ -1842,7 +1860,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       state !== 'WAITING_FOR_QUESTIONS_FILE' &&
       state !== 'WAITING_FOR_FACT_CHECK_FILE' &&
       state !== 'WAITING_FOR_SEO_TZ_FILE' &&
-      state !== 'WAITING_FOR_ARTICLE_FILE'
+      state !== 'WAITING_FOR_ARTICLE_FILE' &&
+      state !== 'WAITING_FOR_UPLOAD_TOPIC'
     ) {
       return;
     }
@@ -1881,11 +1900,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       let articleId = session.articleId;
+      const context = await this.getUserContext(user.id);
 
       if (!articleId) {
         // Create new article if not exists
-        const fileName = document.file_name ?? 'Uploaded Article';
-        const article = await this.articlesService.create(user.id, fileName);
+        const title =
+          context?.title || document.file_name || 'Uploaded Article';
+        const article = await this.articlesService.create(user.id, title);
         articleId = article.id;
         await this.sessionsService.updateArticle(session.id, articleId);
 
@@ -1896,6 +1917,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         );
       } else {
         const article = await this.articlesService.findById(articleId);
+
+        // Update title if provided
+        if (context?.title && !context?.sameTitle) {
+          await this.articlesService.updateTitle(articleId, context.title);
+        }
+
         const articleAddition = article?.additions.find(
           (a) => a.type === ArticleAdditionType.ARTICLE,
         );
@@ -1924,6 +1951,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
       await ctx.reply(
         this.localesService.t('article.upload_article_success') ??
           'Статья успешно загружена и сохранена.',
@@ -2257,12 +2285,18 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.sessionsService.create(user.id);
     }
 
-    await this.setUserState(user.id, 'WAITING_FOR_ARTICLE_FILE');
+    await this.setUserState(user.id, 'WAITING_FOR_UPLOAD_TOPIC');
     await ctx.answerCallbackQuery();
-    await ctx.reply(
-      this.localesService.t('article.upload_article_request') ??
-        'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
-    );
+
+    const message = session?.articleId
+      ? (this.localesService.t(
+          'article.upload_article_topic_request_with_same',
+        ) ??
+        'Введите тему для загружаемой статьи, либо введите /same, если хотите оставить текущую тему:\n/cancel — отменить и вернуться в меню работы со статьей.')
+      : (this.localesService.t('article.upload_article_topic_request') ??
+        'Введите тему для загружаемой статьи:\n/cancel — отменить и вернуться в меню работы со статьей.');
+
+    await ctx.reply(message);
   }
 
   private async handleSeoOptimization(ctx: Context) {
