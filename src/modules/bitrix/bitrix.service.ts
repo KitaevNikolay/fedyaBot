@@ -8,7 +8,7 @@ import { AppLoggerService } from '../../common/logger/app-logger.service';
 export class BitrixService {
   private readonly logger = new Logger(BitrixService.name);
   private readonly webhookUrl: string;
-  private readonly defaultResponsibleId = 177990;
+  private readonly defaultResponsibleId = 235146;
   private readonly auditors = [15924, 12776, 93413, 1206];
   private readonly groupId = 121;
 
