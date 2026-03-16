@@ -29,6 +29,7 @@ RUN mkdir -p /app/logs && chown -R appuser:appgroup /app/logs
 COPY package*.json ./
 COPY prisma ./prisma
 COPY config ./config
+COPY docs ./docs
 # Only production dependencies
 RUN npm install --omit=dev
 

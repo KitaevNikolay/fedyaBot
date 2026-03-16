@@ -477,7 +477,9 @@ export class BothubService {
       });
     }
 
-    const payload = {
+    const url = this.config.api.url;
+
+    const payload: any = {
       model,
       messages,
       max_completion_tokens: max_tokens,
@@ -485,9 +487,11 @@ export class BothubService {
       bothub: {
         include_usage: true,
       },
-      tools: [
+      plugins: [
         {
-          type: 'web_search',
+          id: 'web',
+          engine: 'native',
+          max_results: 5,
         },
       ],
     };
@@ -497,11 +501,11 @@ export class BothubService {
         type: 'external_request',
         integration: 'bothub',
         method: 'POST',
-        url: this.config.api.url,
+        url,
         requestBody: payload,
         ...userContext,
       });
-      const response$ = this.httpService.post(this.config.api.url, payload, {
+      const response$ = this.httpService.post(url, payload, {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
@@ -516,7 +520,7 @@ export class BothubService {
         type: 'external_response',
         integration: 'bothub',
         method: 'POST',
-        url: this.config.api.url,
+        url,
         status: response.status,
         responseBody: response.data,
         ...userContext,
@@ -557,6 +561,10 @@ export class BothubService {
       });
       throw error;
     }
+  }
+
+  private isAnthropicModel(model: string): boolean {
+    return model?.startsWith('claude-');
   }
 
   private resolveFileName(file: string): string {
