@@ -1071,15 +1071,29 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       )
       .row();
 
+    let finalText = text;
+    if (session.articleId) {
+      const competitors = await this.articlesService.getCompetitors(
+        session.articleId,
+      );
+      if (competitors.length > 0) {
+        finalText +=
+          this.localesService.t('article.competitors_disclaimer', {
+            competitors: competitors.join(', '),
+          }) ||
+          `\n\n!!!ВНИМАНИЕ!!! В статье присутствует упоминание конкурентов. Учтите это при работе со статьей. Конкуренты, найденные в тексте: ${competitors.join(', ')}`;
+      }
+    }
+
     if (ctx.callbackQuery && ctx.callbackQuery.message) {
       try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
+        await ctx.editMessageText(finalText, { reply_markup: keyboard });
       } catch (e) {
         this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
+        await ctx.reply(finalText, { reply_markup: keyboard });
       }
     } else {
-      await ctx.reply(text, { reply_markup: keyboard });
+      await ctx.reply(finalText, { reply_markup: keyboard });
     }
     if (ctx.callbackQuery) {
       try {
@@ -1676,7 +1690,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.generateFactCheck(
-        article?.title || 'Mock Title',
+        article?.title || 'Unknown Title',
         articleAddition?.content || 'Mock Content',
         this.getUserLogContext(ctx),
       );
@@ -2558,6 +2572,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const result = await this.bothubService.generateRubrics(
+        article?.title || 'Unknown Title',
         articleAddition?.content || 'Mock Content for Rubrics',
         this.getUserLogContext(ctx),
       );

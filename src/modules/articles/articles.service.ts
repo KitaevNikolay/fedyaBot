@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { ArticleAdditionType } from '@prisma/client';
+import { ArticleAdditionType, TechnicalArticleAdditionState } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { CompetitorsService } from '../competitors/competitors.service';
 
 @Injectable()
 export class ArticlesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly competitorsService: CompetitorsService,
+  ) {}
 
   async create(userId: string, title: string) {
     return this.prisma.article.create({
@@ -18,7 +22,13 @@ export class ArticlesService {
   async findById(id: string) {
     return this.prisma.article.findUnique({
       where: { id },
-      include: { additions: true },
+      include: {
+        additions: true,
+        versions: {
+          orderBy: { iteration: 'desc' },
+          take: 1,
+        },
+      },
     });
   }
 
@@ -27,6 +37,11 @@ export class ArticlesService {
     type: ArticleAdditionType,
     content: string,
   ) {
+    // Если добавляется основной текст статьи, проверяем на конкурентов
+    if (type === ArticleAdditionType.ARTICLE) {
+      await this.updateArticleCompetitors(articleId, content);
+    }
+
     return this.prisma.articleAddition.create({
       data: {
         articleId,
@@ -41,6 +56,11 @@ export class ArticlesService {
     type: ArticleAdditionType,
     content: string,
   ) {
+    // Если обновляется основной текст статьи, проверяем на конкурентов
+    if (type === ArticleAdditionType.ARTICLE) {
+      await this.updateArticleCompetitors(articleId, content);
+    }
+
     const existing = await this.prisma.articleAddition.findFirst({
       where: { articleId, type },
     });
@@ -60,6 +80,9 @@ export class ArticlesService {
     content: string,
     rewriteType?: string | null,
   ) {
+    // При создании новой версии (рерайт) тоже проверяем на конкурентов
+    await this.updateArticleCompetitors(articleId, content);
+
     const count = await this.prisma.articleVersion.count({
       where: { articleId },
     });
@@ -72,6 +95,37 @@ export class ArticlesService {
         rewriteType: rewriteType ?? 'none',
       },
     });
+  }
+
+  private async updateArticleCompetitors(articleId: string, content: string) {
+    const found = this.competitorsService.findCompetitors(content);
+    const competitorsString = found.join(', ');
+
+    // Сохраняем результат проверки в TechnicalArticleAddition
+    await this.prisma.technicalArticleAddition.upsert({
+      where: {
+        id: `competitors_check_${articleId}`, // Генерируем фиксированный ID для апсерта
+      },
+      create: {
+        id: `competitors_check_${articleId}`,
+        articleId,
+        state: TechnicalArticleAdditionState.FINISHED,
+        technicalInfo: competitorsString,
+      },
+      update: {
+        technicalInfo: competitorsString,
+        updatedAt: new Date(),
+      },
+    });
+  }
+
+  async getCompetitors(articleId: string): Promise<string[]> {
+    const check = await this.prisma.technicalArticleAddition.findUnique({
+      where: { id: `competitors_check_${articleId}` },
+    });
+
+    if (!check || !check.technicalInfo) return [];
+    return check.technicalInfo.split(', ').filter(s => s.length > 0);
   }
 
   async updateVersion(id: string, content: string) {

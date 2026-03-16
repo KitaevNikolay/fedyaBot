@@ -151,8 +151,8 @@ export class BothubService {
 
     const prompt = prompts.user
       .replace(/{{\s*article_subject\s*}}/g, articleSubject)
-      .replace(/{{\s*questions_content\s*}}/g, questionsContent)
-      .replace(/{{\s*current_date\s*}}/g, today);
+      .replace(/{{\s*QUESTION\.content\s*}}/g, questionsContent)
+      .replace(/{{\s*today\s*}}/g, today);
 
     if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
       return {
@@ -182,7 +182,7 @@ export class BothubService {
 
     const prompt = prompts.user
       .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
-      .replace(/{{\s*current_date\s*}}/g, today);
+      .replace(/{{\s*today\s*}}/g, today);
 
     if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
       return {
@@ -257,6 +257,7 @@ export class BothubService {
   }
 
   async generateRubrics(
+    articleSubject: string,
     articleContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
@@ -268,10 +269,9 @@ export class BothubService {
       userContext,
     );
 
-    const prompt = prompts.user.replace(
-      /{{\s*ARTICLE\.content\s*}}/g,
-      articleContent,
-    );
+    const prompt = prompts.user
+      .replace(/{{\s*article_subject\s*}}/g, articleSubject)
+      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent);
 
     if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
       return {
