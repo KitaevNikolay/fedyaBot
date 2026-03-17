@@ -79,6 +79,7 @@ type GenerationSettingsPayload = {
   files: string[];
   systemPromptId: string | null;
   userPromptId: string | null;
+  additionalPayload?: Record<string, any> | null;
 };
 
 @Injectable()
@@ -479,7 +480,7 @@ export class BothubService {
 
     const url = this.config.api.url;
 
-    const payload: any = {
+    let payload: any = {
       model,
       messages,
       max_completion_tokens: max_tokens,
@@ -495,6 +496,17 @@ export class BothubService {
         },
       ],
     };
+
+    if (
+      settings?.additionalPayload &&
+      typeof settings.additionalPayload === 'object' &&
+      !Array.isArray(settings.additionalPayload)
+    ) {
+      payload = {
+        ...payload,
+        ...settings.additionalPayload,
+      };
+    }
 
     try {
       await this.appLogger.log({
@@ -644,6 +656,7 @@ export class BothubService {
         files: settings.files ?? [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -657,6 +670,7 @@ export class BothubService {
         files: settings.files ?? [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -671,6 +685,7 @@ export class BothubService {
         files: settings.files ?? [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -685,6 +700,7 @@ export class BothubService {
         files: settings.files ?? [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -696,6 +712,7 @@ export class BothubService {
         files: [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -709,6 +726,7 @@ export class BothubService {
           files: settings.files ?? [],
           systemPromptId: null,
           userPromptId: null,
+          additionalPayload: null,
         };
       }
     }
@@ -723,6 +741,7 @@ export class BothubService {
           files: settings.files ?? [],
           systemPromptId: null,
           userPromptId: null,
+          additionalPayload: null,
         };
       }
     }
@@ -735,6 +754,7 @@ export class BothubService {
         files: [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 
@@ -746,6 +766,7 @@ export class BothubService {
         files: [],
         systemPromptId: null,
         userPromptId: null,
+        additionalPayload: null,
       };
     }
 

@@ -10,6 +10,7 @@ export type GenerationSettingsDto = {
   files: string[];
   systemPromptId: string | null;
   userPromptId: string | null;
+  additionalPayload: Record<string, any> | null;
 };
 
 @Injectable()
@@ -35,6 +36,7 @@ export class GenerationSettingsService {
       files,
       systemPromptId: settings.systemPromptId,
       userPromptId: settings.userPromptId,
+      additionalPayload: settings.additionalPayload as Record<string, any> | null,
     };
   }
 
@@ -48,6 +50,7 @@ export class GenerationSettingsService {
       files: this.parseFiles(s.files),
       systemPromptId: s.systemPromptId,
       userPromptId: s.userPromptId,
+      additionalPayload: s.additionalPayload as Record<string, any> | null,
     }));
   }
 
@@ -56,7 +59,10 @@ export class GenerationSettingsService {
     data: Partial<Omit<GenerationSettingsDto, 'type'>>,
   ): Promise<GenerationSettingsDto> {
     const { files, ...rest } = data;
-    const updateData: Prisma.GenerationSettingsUpdateInput = { ...rest };
+    const updateData: Prisma.GenerationSettingsUpdateInput = {
+      ...rest,
+      additionalPayload: rest.additionalPayload as Prisma.InputJsonValue,
+    };
     if (files) {
       updateData.files = JSON.stringify(files);
     }
@@ -74,6 +80,7 @@ export class GenerationSettingsService {
       files: this.parseFiles(settings.files),
       systemPromptId: settings.systemPromptId,
       userPromptId: settings.userPromptId,
+      additionalPayload: settings.additionalPayload as Record<string, any> | null,
     };
   }
 

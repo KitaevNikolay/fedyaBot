@@ -105,8 +105,9 @@ model GenerationSettings {
   files          String   @db.LongText
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
-  systemPromptId String?
-  userPromptId   String?
+  systemPromptId    String?
+  userPromptId      String?
+  additionalPayload Json?
 }
 
 enum ArticleAdditionType {
