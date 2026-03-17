@@ -21,6 +21,9 @@ services:
       - .env.dev
     environment:
       DATABASE_URL: "mysql://fedya:fedya@db:3306/fedya"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+    extra_hosts:
+      - "api.telegram.org:149.154.167.220"
     volumes:
       - .:/app
       - /app/node_modules

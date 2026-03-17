@@ -80,23 +80,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     this.bot.use(async (ctx, next) => {
       // Deduplication to prevent multiple processing of the same update (e.g. on webhook retries)
-      const updateId = ctx.update.update_id.toString();
-      const lockKey = `update_lock:${updateId}`;
+      if (ctx.update?.update_id) {
+        const updateId = ctx.update.update_id.toString();
+        const lockKey = `update_lock:${updateId}`;
 
-      // Use setnx (set if not exists) for atomic operation
-      const lockAcquired = await this.redisService['redis'].set(
-        lockKey,
-        '1',
-        'EX',
-        60,
-        'NX',
-      );
-
-      if (!lockAcquired) {
-        this.logger.log(
-          `Update ${updateId} is already being processed or finished, skipping`,
+        // Use setnx (set if not exists) for atomic operation
+        const lockAcquired = await this.redisService['redis'].set(
+          lockKey,
+          '1',
+          'EX',
+          60,
+          'NX',
         );
-        return;
+
+        if (!lockAcquired) {
+          this.logger.log(
+            `Update ${updateId} is already being processed or finished, skipping`,
+          );
+          // Не вызываем next(), чтобы прервать обработку
+          return;
+        }
       }
 
       const userContext = this.getUserLogContext(ctx);
@@ -136,6 +139,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         }
       }
       this.wrapBotMethods(ctx, userContext);
+      
       try {
         await next();
       } catch (error) {
@@ -490,7 +494,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     });
 
     try {
-      await this.bot.api.setMyCommands([
+      // Don't await setMyCommands to prevent blocking app startup if Telegram API hangs
+      this.bot.api.setMyCommands([
         {
           command: startCommand,
           description: this.localesService.t('commands.start'),
@@ -503,19 +508,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           command: menuCommand,
           description: this.localesService.t('commands.menu'),
         },
-      ]);
+      ]).catch(error => {
+        this.logger.warn(`Failed to set bot commands: ${error}`);
+      });
     } catch (error) {
-      this.logger.warn(`Failed to set bot commands: ${error}`);
+      this.logger.warn(`Failed to set bot commands synchronously: ${error}`);
     }
 
     if (webhookUrl) {
-      await this.bot.api.setWebhook(webhookUrl);
-      this.logger.log('Telegram webhook set');
+      this.bot.api.setWebhook(webhookUrl).then(() => {
+        this.logger.log('Telegram webhook set');
+      }).catch(error => {
+        this.logger.warn(`Failed to set Telegram webhook: ${error}`);
+      });
     } else {
-      void this.bot.start({
+      this.bot.start({
         onStart: (botInfo) => {
           this.logger.log(`Telegram bot started as ${botInfo.username}`);
         },
+      }).catch(error => {
+        this.logger.error(`Failed to start Telegram bot: ${error}`);
       });
     }
 

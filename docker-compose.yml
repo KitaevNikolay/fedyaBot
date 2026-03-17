@@ -8,11 +8,17 @@ services:
     restart: always
     env_file:
       - .env.prod
+    environment:
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     # For connecting to external DB/Nginx on host
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "outline.rilokobotfactory3.ru:host-gateway"
       - "fedyabot.rilokobotfactory3.ru:host-gateway"
+      - "api.telegram.org:149.154.167.220"
     ports:
       - "7000:3000"
     volumes:
