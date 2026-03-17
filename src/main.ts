@@ -27,25 +27,15 @@ async function bootstrap() {
     });
   });
 
-  app.use((req, res, next) => {
-    console.log(`[App] Incoming: ${req.method} ${req.url}`);
-    next();
-  });
-
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
       whitelist: true,
     }),
   );
-  app.use((req, res, next) => {
-    console.log(`[App] Incoming request: ${req.method} ${req.url}`);
-    next();
-  });
   const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
-    const jsonParser = json();
     type WebhookHandler = (
       req: Request,
       res: Response,
@@ -56,7 +46,6 @@ async function bootstrap() {
       webhookPath,
       json(),
       (req: Request, res: Response, next: NextFunction) => {
-        console.log(`[Webhook] Processing update: ${req.method} ${req.url}, body exists: ${!!req.body}`);
         if (!handler) {
           const botService = app.get(BotService);
           handler = webhookCallback(
