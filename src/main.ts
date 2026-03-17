@@ -48,9 +48,13 @@ async function bootstrap() {
     let handler: WebhookHandler | null = null;
     app.use(
       webhookPath,
+      (req, res, next) => {
+        console.log(`[WebhookRaw] Incoming: ${req.method} ${req.url}`);
+        next();
+      },
       jsonParser,
       (req: Request, res: Response, next: NextFunction) => {
-        console.log(`[Webhook] Received request: ${req.method} ${req.url}`);
+        console.log(`[Webhook] Processing update: ${req.method} ${req.url}`);
         if (!handler) {
           const botService = app.get(BotService);
           handler = webhookCallback(
