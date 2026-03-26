@@ -5,11 +5,14 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 import {
   ArticleAdditionType,
   TechnicalArticleAdditionState,
 } from '@prisma/client';
 import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { DocxUtil } from '../../common/utils/docx.util';
 import { ConstantsService } from '../../config/constants.service';
 import { LocalesService } from '../../config/locales.service';
@@ -38,11 +41,28 @@ type UserContext = {
   bitrixId?: string;
 };
 
+function buildTelegramFileUrl(
+  baseUrl: string | undefined,
+  token: string,
+  filePath: string,
+): string {
+  const normalizedBaseUrl = (baseUrl || 'https://api.telegram.org').replace(
+    /\/+$/,
+    '',
+  );
+  return `${normalizedBaseUrl}/file/bot${token}/${filePath}`;
+}
+
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
   private bot: Bot<Context>;
   private botToken: string | null = null;
   private uniquenessInterval: NodeJS.Timeout | null = null;
+  private pollingStarted = false;
+  private readonly telegramApiBaseUrl?: string;
+  private readonly telegramProxyAgent?:
+    | HttpsProxyAgent<string>
+    | SocksProxyAgent;
   private readonly logger = new Logger(BotService.name);
 
   constructor(
@@ -60,7 +80,19 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     private readonly technicalArticleAdditionsService: TechnicalArticleAdditionsService,
     private readonly textRuService: TextRuService,
     private readonly bitrixService: BitrixService,
-  ) {}
+  ) {
+    this.telegramApiBaseUrl = this.configService.get<string>(
+      'TELEGRAM_API_BASE_URL',
+    );
+    const telegramProxyUrl =
+      this.configService.get<string>('TELEGRAM_PROXY_URL');
+
+    if (telegramProxyUrl) {
+      this.telegramProxyAgent = telegramProxyUrl.startsWith('socks')
+        ? new SocksProxyAgent(telegramProxyUrl)
+        : new HttpsProxyAgent(telegramProxyUrl);
+    }
+  }
 
   async onModuleInit() {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
@@ -69,7 +101,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.botToken = token;
-    this.bot = new Bot<Context>(token);
+    this.bot = new Bot<Context>(
+      token,
+      this.telegramApiBaseUrl || this.telegramProxyAgent
+        ? {
+            client: {
+              ...(this.telegramApiBaseUrl
+                ? { apiRoot: this.telegramApiBaseUrl }
+                : {}),
+              ...(this.telegramProxyAgent
+                ? {
+                    baseFetchConfig: {
+                      agent: this.telegramProxyAgent as any,
+                      compress: true,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : undefined,
+    );
     const webhookUrl = this.configService.get<string>('TELEGRAM_WEBHOOK_URL');
     const startCommand =
       this.constantsService.get<string>('commands.start') ?? 'start';
@@ -522,13 +573,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Failed to set Telegram webhook: ${error}`);
       });
     } else {
-      this.bot.start({
-        onStart: (botInfo) => {
-          this.logger.log(`Telegram bot started as ${botInfo.username}`);
-        },
-      }).catch(error => {
-        this.logger.error(`Failed to start Telegram bot: ${error}`);
-      });
+      this.startPolling();
     }
 
     this.uniquenessInterval = setInterval(() => {
@@ -553,7 +598,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.uniquenessInterval);
       this.uniquenessInterval = null;
     }
-    if (this.bot) {
+    if (this.bot && this.pollingStarted) {
       await this.bot.stop();
     }
   }
@@ -2106,11 +2151,46 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!this.botToken) return null;
     const file = await this.bot.api.getFile(fileId);
     if (!file.file_path) return null;
-    const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    const url = buildTelegramFileUrl(
+      this.telegramApiBaseUrl,
+      this.botToken,
+      file.file_path,
+    );
+    const response = await axios.get<ArrayBuffer>(url, {
+      responseType: 'arraybuffer',
+      ...(this.telegramProxyAgent
+        ? {
+            httpAgent: this.telegramProxyAgent,
+            httpsAgent: this.telegramProxyAgent,
+            proxy: false,
+          }
+        : {}),
+    });
+    return Buffer.from(response.data);
+  }
+
+  private startPolling() {
+    if (this.pollingStarted) {
+      return;
+    }
+
+    this.pollingStarted = true;
+    void (async () => {
+      try {
+        await this.bot.api.deleteWebhook({ drop_pending_updates: false });
+        this.logger.log('Telegram webhook removed, starting long polling');
+
+        await this.bot.start({
+          allowed_updates: ['message', 'callback_query'],
+          onStart: (botInfo) => {
+            this.logger.log(`Telegram bot started as ${botInfo.username}`);
+          },
+        });
+      } catch (error) {
+        this.pollingStarted = false;
+        this.logger.error(`Failed to start Telegram bot: ${error}`);
+      }
+    })();
   }
 
   private async handleConfirmRewrite(ctx: Context) {
