@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { BothubModule } from '../bothub/bothub.module';
 import { DatabaseModule } from '../../database/database.module';
 import { GenerationSettingsModule } from '../generation-settings/generation-settings.module';
@@ -26,6 +27,10 @@ import { AdminService } from './admin.service';
     AdminGenerationSettingsService,
     AdminSessionService,
     CabinetAdminGuard,
+    {
+      provide: APP_GUARD,
+      useClass: CabinetAdminGuard,
+    },
   ],
 })
 export class AdminModule {}
