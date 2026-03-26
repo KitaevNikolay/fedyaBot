@@ -1,7 +1,7 @@
-import { ArrowLeftOutlined, LockOutlined, MessageOutlined } from '@ant-design/icons';
+import { LockOutlined, MessageOutlined } from '@ant-design/icons';
 import { Alert, App, Card, Descriptions, Space, Tag, Typography } from 'antd';
 import { useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { adminApi } from '../shared/api/adminApi';
 import { getAdminAccessToken, setAdminAccessToken } from '../shared/auth/adminSession';
 import type {
@@ -88,11 +88,6 @@ export function AuthPage() {
 
   return (
     <div className="auth-shell">
-      <div className="auth-back">
-        <Link to="/" className="auth-back-link">
-          <ArrowLeftOutlined /> Вернуться в кабинет
-        </Link>
-      </div>
       <div className="auth-grid">
         <Card className="auth-intro-card">
           <Space direction="vertical" size={20}>
@@ -103,9 +98,7 @@ export function AuthPage() {
               Авторизация через Telegram
             </Typography.Title>
             <Typography.Paragraph className="auth-description">
-              Доступ к кабинету открыт только пользователям с ролью <code>admin</code>.
-              После подтверждения Telegram backend проверяет payload и выдаёт
-              административную сессию только для администраторов.
+              Доступ к кабинету открыт только пользователям с ролью admin.
             </Typography.Paragraph>
             <Alert
               type="info"
@@ -122,10 +115,6 @@ export function AuthPage() {
               <Typography.Title level={4}>
                 Вход через <MessageOutlined /> Telegram
               </Typography.Title>
-              <Typography.Paragraph>
-                Укажите <code>VITE_TELEGRAM_BOT_USERNAME</code> в <code>cabinet/.env</code>,
-                после чего страница сможет отрисовать виджет для реальной авторизации.
-              </Typography.Paragraph>
             </div>
 
             <TelegramLoginWidget
