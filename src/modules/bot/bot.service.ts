@@ -19,7 +19,6 @@ import { LocalesService } from '../../config/locales.service';
 import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { ArticlesService } from '../articles/articles.service';
 import { BothubService, GenerationResult } from '../bothub/bothub.service';
-import { GenerationSettingsService } from '../generation-settings/generation-settings.service';
 import { RedisService } from '../redis/redis.service';
 import { ScenariosService } from '../scenarios/scenarios.service';
 import { SessionsService } from '../sessions/sessions.service';
@@ -36,8 +35,6 @@ type UserContext = {
   articleContent?: string;
   factCheckContent?: string;
   rewrittenArticleContent?: string;
-  settingType?: string;
-  settingParam?: string;
   bitrixId?: string;
 };
 
@@ -55,6 +52,13 @@ function buildTelegramFileUrl(
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
+  private static readonly FILE_UPLOAD_STATES = new Set([
+    'WAITING_FOR_QUESTIONS_FILE',
+    'WAITING_FOR_FACT_CHECK_FILE',
+    'WAITING_FOR_SEO_TZ_FILE',
+    'WAITING_FOR_ARTICLE_FILE',
+  ]);
+
   private bot: Bot<Context>;
   private botToken: string | null = null;
   private uniquenessInterval: NodeJS.Timeout | null = null;
@@ -65,6 +69,45 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     | SocksProxyAgent;
   private readonly logger = new Logger(BotService.name);
 
+  private isCancelCommand(text?: string | null) {
+    return /^\/cancel(?:@[\w_]+)?$/i.test(text?.trim() ?? '');
+  }
+
+  private isFileUploadState(state?: string | null) {
+    return typeof state === 'string' && BotService.FILE_UPLOAD_STATES.has(state);
+  }
+
+  private isCancelableState(state?: string | null) {
+    return typeof state === 'string' && state.startsWith('WAITING_FOR_');
+  }
+
+  private getFileUploadPrompt(state?: string | null) {
+    switch (state) {
+      case 'WAITING_FOR_QUESTIONS_FILE':
+        return (
+          this.localesService.t('article.upload_questions') ||
+          'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_FACT_CHECK_FILE':
+        return (
+          this.localesService.t('article.upload_fact_check') ||
+          'Пришлите факт-чек в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_SEO_TZ_FILE':
+        return (
+          this.localesService.t('article.seo_tz_request') ||
+          'Для сео-оптимизации пришлите ТЗ в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_ARTICLE_FILE':
+        return (
+          this.localesService.t('article.upload_article_request') ||
+          'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      default:
+        return this.localesService.t('errors.invalid_docx_format');
+    }
+  }
+
   constructor(
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
@@ -73,7 +116,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     private readonly localesService: LocalesService,
     private readonly constantsService: ConstantsService,
     private readonly bothubService: BothubService,
-    private readonly generationSettingsService: GenerationSettingsService,
     private readonly articlesService: ArticlesService,
     private readonly redisService: RedisService,
     private readonly appLogger: AppLoggerService,
@@ -321,27 +363,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const downloadPrefix =
       this.constantsService.get<string>('callbacks.download_prefix') ??
       'download:';
-    const adminMenuCallback =
-      this.constantsService.get<string>('callbacks.admin_menu') ?? 'admin_menu';
-    const adminUsersCallback =
-      this.constantsService.get<string>('callbacks.admin_users') ??
-      'admin_users';
-    const adminSettingsCallback =
-      this.constantsService.get<string>('callbacks.admin_settings') ??
-      'admin_settings';
-    const adminBackToMainCallback =
-      this.constantsService.get<string>('callbacks.admin_back_to_main') ??
-      'admin_back_to_main';
-    const adminBackToAdminCallback =
-      this.constantsService.get<string>('callbacks.admin_back_to_admin') ??
-      'admin_back_to_admin';
-    const adminSettingsViewCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_view') ??
-      'admin_settings_view';
-    const adminSettingsEditCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_edit') ??
-      'admin_settings_edit';
-
     this.bot.callbackQuery(
       [selectScenarioCallback, chooseAnotherScenarioCallback, mainMenuCallback],
       async (ctx) => {
@@ -490,48 +511,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.handleDownloadItem(ctx);
     });
 
-    this.bot.callbackQuery(adminMenuCallback, async (ctx) => {
-      await this.handleAdminMenu(ctx);
-    });
-
-    this.bot.callbackQuery(adminUsersCallback, async (ctx) => {
-      await this.handleAdminUsers(ctx);
-    });
-
-    this.bot.callbackQuery(adminSettingsCallback, async (ctx) => {
-      await this.handleAdminSettings(ctx);
-    });
-
-    this.bot.callbackQuery(adminBackToMainCallback, async (ctx) => {
-      await this.handleStart(ctx);
-      await ctx.answerCallbackQuery();
-    });
-
-    this.bot.callbackQuery(adminBackToAdminCallback, async (ctx) => {
-      await this.handleAdminMenu(ctx);
-    });
-
-    this.bot.callbackQuery(adminSettingsViewCallback, async (ctx) => {
-      await this.handleAdminSettingsView(ctx);
-    });
-
-    this.bot.callbackQuery(adminSettingsEditCallback, async (ctx) => {
-      await this.handleAdminSettingsEdit(ctx);
-    });
-
-    // Dynamic callbacks for settings
-    this.bot.callbackQuery(/^admin_settings_view:/, async (ctx) => {
-      await this.handleAdminSettingsViewType(ctx);
-    });
-
-    this.bot.callbackQuery(/^admin_settings_edit:/, async (ctx) => {
-      await this.handleAdminSettingsEditType(ctx);
-    });
-
-    this.bot.callbackQuery(/^admin_settings_param:/, async (ctx) => {
-      await this.handleAdminSettingsEditParam(ctx);
-    });
-
     this.bot.callbackQuery(new RegExp(`^${scenarioPrefix}`), async (ctx) => {
       await this.handleScenarioSelected(ctx);
     });
@@ -672,6 +651,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async logGenerationResultEvent(
+    ctx: Context,
+    generationType: string,
+    result: GenerationResult,
+    articleId?: string,
+  ) {
+    await this.appLogger.log({
+      type: 'generation_result',
+      stage: generationType,
+      articleId,
+      text: result.content.slice(0, 1000),
+      ...this.getUserLogContext(ctx),
+    });
+  }
+
   private wrapBotMethods(ctx: Context, userContext: Record<string, unknown>) {
     const reply = ctx.reply.bind(ctx) as unknown as Context['reply'];
     ctx.reply = (async (...args: Parameters<Context['reply']>) => {
@@ -766,16 +760,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     const keyboard = new InlineKeyboard();
-
-    if (user.role === 'admin') {
-      keyboard
-        .text(
-          this.localesService.t('menu.admin'),
-          this.constantsService.get<string>('callbacks.admin_menu') ??
-            'admin_menu',
-        )
-        .row();
-    }
+    keyboard
+      .url('Админка', 'https://fedyabot-admin.rilokobotfactory4.ru')
+      .row();
 
     if (!session.scenarioId) {
       keyboard
@@ -1193,8 +1180,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     const state = await this.getUserState(user.id);
     const text = ctx.message.text.trim();
-    if (text === '/cancel') {
+    if (this.isCancelCommand(text)) {
       await this.handleCancel(ctx);
+      return;
+    }
+
+    if (this.isFileUploadState(state)) {
+      await ctx.reply(this.getFileUploadPrompt(state));
       return;
     }
 
@@ -1215,64 +1207,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(message);
       return;
     }
-
-    if (state === 'WAITING_FOR_SETTING_VALUE') {
-      const context = await this.getUserContext(user.id);
-      if (!context || !context.settingType || !context.settingParam) {
-        await ctx.reply('Ошибка контекста. Попробуйте снова.');
-        await this.deleteUserState(user.id);
-        return;
-      }
-      const { settingType, settingParam } = context;
-      const value = ctx.message.text;
-      const updatePayload: {
-        model?: string;
-        temperature?: number;
-        maxTokens?: number;
-        files?: string[];
-        systemPromptId?: string | null;
-        userPromptId?: string | null;
-      } = {};
-
-      try {
-        if (settingParam === 'temperature') {
-          const parsedValue = parseFloat(value.replace(',', '.'));
-          if (isNaN(parsedValue)) throw new Error('Invalid number');
-          updatePayload.temperature = parsedValue;
-        } else if (settingParam === 'maxTokens') {
-          const parsedValue = parseInt(value, 10);
-          if (isNaN(parsedValue)) throw new Error('Invalid number');
-          updatePayload.maxTokens = parsedValue;
-        } else if (settingParam === 'files') {
-          updatePayload.files = value
-            .split(',')
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
-        } else if (settingParam === 'model') {
-          updatePayload.model = value;
-        } else if (settingParam === 'systemPromptId') {
-          updatePayload.systemPromptId = value.length > 0 ? value : null;
-        } else if (settingParam === 'userPromptId') {
-          updatePayload.userPromptId = value.length > 0 ? value : null;
-        } else {
-          throw new Error('Invalid param');
-        }
-
-        await this.generationSettingsService.update(settingType, updatePayload);
-
-        await ctx.reply(
-          this.localesService.t('admin.setting_updated', {
-            param: settingParam,
-            value: value,
-          }) || `Параметр ${settingParam} обновлен.`,
-        );
-        await this.deleteUserState(user.id);
-      } catch {
-        await ctx.reply('Некорректное значение. Попробуйте снова.');
-      }
-      return;
-    }
-
     if (state === 'WAITING_FOR_TOPIC') {
       const title = ctx.message.text;
       await this.setUserContext(user.id, { title });
@@ -1420,6 +1354,30 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!user) return;
 
     const state = await this.getUserState(user.id);
+    if (this.isCancelableState(state)) {
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+
+      if (state === 'WAITING_FOR_BITRIX_ID') {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в начальное меню.',
+        );
+        await this.handleStart(ctx);
+      } else {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в меню работы со статьей.',
+        );
+        await this.handleWorkWithArticle(ctx);
+      }
+
+      if (ctx.callbackQuery) {
+        await ctx.answerCallbackQuery();
+      }
+      return;
+    }
+
     if (
       state === 'WAITING_FOR_TOPIC' ||
       state === 'WAITING_FOR_UPLOAD_TOPIC' ||
@@ -1497,6 +1455,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.getUserLogContext(ctx),
       );
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_questions',
+        questionsResult,
+        article.id,
+      );
       await this.sendGenerationResult(ctx, questionsResult, 'questions');
 
       // Save context for regeneration/confirmation
@@ -1650,6 +1614,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.getUserLogContext(ctx),
       );
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_article',
+        articleResult,
+        articleId,
+      );
       await this.sendGenerationResult(ctx, articleResult, 'article');
 
       await this.setUserContext(userId, {
@@ -1752,6 +1722,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.getUserLogContext(ctx),
       );
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_fact_check',
+        result,
+        article?.id,
+      );
       await this.sendGenerationResult(ctx, result, 'fact_check');
 
       await ctx.reply(
@@ -1857,6 +1833,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'rewrite_article',
+        result,
+        article?.id,
+      );
       await this.sendGenerationResult(ctx, result, 'rewritten_article');
 
       await ctx.reply(
@@ -1927,6 +1909,24 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!document) return;
 
     const state = await this.getUserState(user.id);
+    const caption = ctx.message?.caption?.trim();
+    if (this.isCancelCommand(caption)) {
+      await this.handleCancel(ctx);
+      return;
+    }
+
+    if (state === 'WAITING_FOR_UPLOAD_TOPIC') {
+      await ctx.reply(
+        this.localesService.t('article.enter_uploaded_article_topic') ||
+          'Введите тему статьи текстом или используйте /same.',
+      );
+      return;
+    }
+
+    if (!this.isFileUploadState(state)) {
+      return;
+    }
+
     if (
       state !== 'WAITING_FOR_QUESTIONS_FILE' &&
       state !== 'WAITING_FOR_FACT_CHECK_FILE' &&
@@ -2113,6 +2113,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'seo_rewrite_article',
+        result,
+        context.articleId,
+      );
       await this.sendGenerationResult(ctx, result, 'seo_article');
 
       await ctx.reply(
@@ -2669,6 +2675,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.getUserLogContext(ctx),
       );
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_rubrics',
+        result,
+        article?.id,
+      );
       await this.sendGenerationResult(ctx, result, 'rubrics');
 
       if (article) {
@@ -2734,6 +2746,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.getUserLogContext(ctx),
       );
 
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_products',
+        result,
+        article?.id,
+      );
       await this.sendGenerationResult(ctx, result, 'products');
 
       if (article) {
@@ -2757,358 +2775,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(this.localesService.t('errors.generation_failed'));
     }
   }
-
-  private async handleAdminMenu(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') {
-      return;
-    }
-
-    const text = this.localesService.t('menu.admin_title', {
-      firstName: user.firstName ?? 'Admin',
-    });
-
-    const keyboard = new InlineKeyboard()
-      .text(
-        this.localesService.t('menu.admin_users'),
-        this.constantsService.get<string>('callbacks.admin_users') ??
-          'admin_users',
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_settings'),
-        this.constantsService.get<string>('callbacks.admin_settings') ??
-          'admin_settings',
-      )
-      .row()
-      .url(
-        this.localesService.t('menu.admin_prompts'),
-        'https://outline.rilokobotfactory3.ru/',
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_back_to_main'),
-        this.constantsService.get<string>('callbacks.admin_back_to_main') ??
-          'admin_back_to_main',
-      );
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
-      }
-      await ctx.answerCallbackQuery();
-    } else {
-      await ctx.reply(text, { reply_markup: keyboard });
-    }
-  }
-
-  private async handleAdminUsers(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') {
-      return;
-    }
-
-    const text = this.localesService.t('menu.admin_users');
-
-    const keyboard = new InlineKeyboard()
-      .text(
-        this.localesService.t('menu.admin_users_list'),
-        'admin_users_list_stub',
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_users_activate'),
-        'admin_users_activate_stub',
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_users_delete'),
-        'admin_users_delete_stub',
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_back_to_admin'),
-        this.constantsService.get<string>('callbacks.admin_back_to_admin') ??
-          'admin_back_to_admin',
-      );
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
-      }
-      await ctx.answerCallbackQuery();
-    }
-  }
-
-  private async handleAdminSettings(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') {
-      return;
-    }
-
-    const text = this.localesService.t('menu.admin_settings');
-
-    const adminSettingsViewCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_view') ??
-      'admin_settings_view';
-    const adminSettingsEditCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_edit') ??
-      'admin_settings_edit';
-    const adminBackToAdminCallback =
-      this.constantsService.get<string>('callbacks.admin_back_to_admin') ??
-      'admin_back_to_admin';
-
-    const keyboard = new InlineKeyboard()
-      .text(
-        this.localesService.t('menu.admin_settings_view'),
-        adminSettingsViewCallback,
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_settings_edit'),
-        adminSettingsEditCallback,
-      )
-      .row()
-      .text(
-        this.localesService.t('menu.admin_back_to_admin'),
-        adminBackToAdminCallback,
-      );
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
-      }
-      await ctx.answerCallbackQuery();
-    }
-  }
-
-  private async handleAdminSettingsView(ctx: Context) {
-    await this.showSettingsTypeMenu(ctx, 'admin_settings_view');
-  }
-
-  private async handleAdminSettingsEdit(ctx: Context) {
-    await this.showSettingsTypeMenu(ctx, 'admin_settings_edit');
-  }
-
-  private async showSettingsTypeMenu(
-    ctx: Context,
-    action: 'admin_settings_view' | 'admin_settings_edit',
-  ) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') {
-      return;
-    }
-
-    const settings = await this.generationSettingsService.getAll();
-    const keyboard = new InlineKeyboard();
-
-    for (const setting of settings) {
-      const label =
-        this.localesService.t(`settings_types.${setting.type}`) !==
-        `settings_types.${setting.type}`
-          ? this.localesService.t(`settings_types.${setting.type}`)
-          : setting.type;
-      keyboard.text(label, `${action}:${setting.type}`).row();
-    }
-
-    const adminBackToAdminCallback =
-      this.constantsService.get<string>('callbacks.admin_back_to_admin') ??
-      'admin_back_to_admin';
-
-    keyboard.text(
-      this.localesService.t('menu.admin_back_to_admin'),
-      adminBackToAdminCallback,
-    );
-
-    const text =
-      action === 'admin_settings_view'
-        ? this.localesService.t('menu.admin_settings_view_title') ||
-          'Выберите тип генерации для просмотра:'
-        : this.localesService.t('menu.admin_settings_edit_title') ||
-          'Выберите тип генерации для изменения:';
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
-      }
-      await ctx.answerCallbackQuery();
-    }
-  }
-
-  private async handleAdminSettingsViewType(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') return;
-
-    const data = ctx.callbackQuery?.data;
-    if (!data) return;
-
-    const type = data.replace('admin_settings_view:', '');
-    const settings = await this.generationSettingsService.getByType(type);
-
-    if (!settings) {
-      await ctx.answerCallbackQuery({
-        text: 'Настройки не найдены',
-        show_alert: true,
-      });
-      return;
-    }
-
-    const escapeMarkdown = (
-      text: string | number | null | undefined,
-    ): string => {
-      if (text === null || text === undefined) return 'Нет';
-      return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
-    };
-
-    const message = `
-*Тип:* ${escapeMarkdown(settings.type)}
-*Модель:* ${escapeMarkdown(settings.model)}
-*Температура:* ${escapeMarkdown(settings.temperature)}
-*Max Tokens:* ${escapeMarkdown(settings.maxTokens)}
-*Файлы:* ${settings.files.length} шт.
-*System Prompt ID:* ${escapeMarkdown(settings.systemPromptId)}
-*User Prompt ID:* ${escapeMarkdown(settings.userPromptId)}
-    `;
-
-    const adminSettingsViewCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_view') ??
-      'admin_settings_view';
-
-    const keyboard = new InlineKeyboard().text(
-      this.localesService.t('menu.back'),
-      adminSettingsViewCallback,
-    );
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(message, {
-          reply_markup: keyboard,
-          parse_mode: 'Markdown',
-        });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(message, {
-          reply_markup: keyboard,
-          parse_mode: 'Markdown',
-        });
-      }
-      await ctx.answerCallbackQuery();
-    }
-  }
-
-  private async handleAdminSettingsEditType(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') return;
-
-    const data = ctx.callbackQuery?.data;
-    if (!data) return;
-
-    const type = data.replace('admin_settings_edit:', '');
-    // Check if settings exist
-    const settings = await this.generationSettingsService.getByType(type);
-    if (!settings) {
-      await ctx.answerCallbackQuery({
-        text: 'Настройки не найдены',
-        show_alert: true,
-      });
-      return;
-    }
-
-    const keyboard = new InlineKeyboard();
-    const params = [
-      'model',
-      'temperature',
-      'maxTokens',
-      'files',
-      'systemPromptId',
-      'userPromptId',
-    ];
-
-    for (const param of params) {
-      keyboard.text(param, `admin_settings_param:${type}:${param}`).row();
-    }
-
-    const adminSettingsEditCallback =
-      this.constantsService.get<string>('callbacks.admin_settings_edit') ??
-      'admin_settings_edit';
-
-    keyboard.text(
-      this.localesService.t('menu.back'),
-      adminSettingsEditCallback,
-    );
-
-    const text =
-      this.localesService.t('menu.admin_settings_edit_param_title') ||
-      'Выберите параметр для изменения:';
-
-    if (ctx.callbackQuery && ctx.callbackQuery.message) {
-      try {
-        await ctx.editMessageText(text, { reply_markup: keyboard });
-      } catch (e) {
-        this.logger.warn(`Failed to edit message: ${e}`);
-        await ctx.reply(text, { reply_markup: keyboard });
-      }
-      await ctx.answerCallbackQuery();
-    }
-  }
-
-  private async handleAdminSettingsEditParam(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user || user.role !== 'admin') return;
-
-    const data = ctx.callbackQuery?.data;
-    if (!data) return;
-
-    // Format: admin_settings_param:<type>:<param>
-    const parts = data.split(':');
-    if (parts.length < 3) return;
-    const type = parts[1];
-    const param = parts[2];
-
-    await this.setUserState(user.id, 'WAITING_FOR_SETTING_VALUE');
-    await this.setUserContext(user.id, {
-      settingType: type,
-      settingParam: param,
-    });
-
-    const message =
-      this.localesService.t('admin.enter_new_value', { param }) ||
-      `Введите новое значение для ${param}:`;
-
-    await ctx.reply(message);
-    await ctx.answerCallbackQuery();
-  }
-
   private async handleDownloadMenu(ctx: Context) {
     const telegramId = ctx.from?.id?.toString();
     if (!telegramId) return;
@@ -3524,3 +3190,4 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
+

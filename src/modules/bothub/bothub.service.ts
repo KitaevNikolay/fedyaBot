@@ -1,139 +1,35 @@
-import { HttpService } from '@nestjs/axios';
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { lastValueFrom } from 'rxjs';
-import { GenerationSettingsService } from '../generation-settings/generation-settings.service';
-import { OutlineService } from '../outline/outline.service';
-import { AppLoggerService } from '../../common/logger/app-logger.service';
+import { Injectable } from '@nestjs/common';
+import {
+  applyPromptTemplate,
+  PromptPlaceholderKey,
+} from './prompt-template.helpers';
+import { BothubApiClientService } from './bothub-api-client.service';
+import { BothubGenerationResolverService } from './bothub-generation-resolver.service';
+import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
+import type { BothubModelOption, GenerationResult } from './bothub.types';
 
-interface ArticleSettings {
-  model: string;
-  temperature: number;
-  max_tokens: number;
-  files: string[];
-}
-
-interface BothubConfig {
-  api: {
-    url: string;
-    model: string;
-    temperature: number;
-    max_tokens: number;
-  };
-  prompts: {
-    generate_questions: string;
-    generate_article: string;
-    generate_fact_check: string;
-    rewrite_article: string;
-    seo_rewrite_article: string;
-    generate_rubrics: string;
-    generate_products: string;
-    article_uniqueness: string;
-    uniq_prompt: string;
-  };
-  article_settings?: ArticleSettings;
-  fact_check_settings?: ArticleSettings;
-  rewrite_settings?: ArticleSettings;
-  rubric_settings?: ArticleSettings;
-  product_settings?: ArticleSettings;
-}
-
-export interface GenerationResult {
-  content: string;
-  usage?: number;
-  mockSystemPrompt?: string;
-  mockUserPrompt?: string;
-}
-
-interface BothubResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-  usage?: {
-    bothub?: {
-      caps?: number;
-    };
-  };
-}
-
-interface BothubBalanceResponse {
-  subscription?: {
-    plan?: {
-      type?: string;
-    };
-    available_balance?: number;
-  };
-  error?: {
-    message?: string;
-  };
-}
-
-type GenerationSettingsPayload = {
-  model: string;
-  temperature: number;
-  maxTokens: number;
-  files: string[];
-  systemPromptId: string | null;
-  userPromptId: string | null;
-  additionalPayload?: Record<string, any> | null;
-};
+export type { GenerationResult } from './bothub.types';
 
 @Injectable()
 export class BothubService {
-  private readonly logger = new Logger(BothubService.name);
-  private readonly config: BothubConfig;
-  private readonly apiKey: string;
-
   constructor(
-    private readonly configService: ConfigService,
-    private readonly httpService: HttpService,
-    private readonly outlineService: OutlineService,
-    private readonly generationSettingsService: GenerationSettingsService,
-    private readonly appLogger: AppLoggerService,
-  ) {
-    const configPath = join(process.cwd(), 'config', 'bothub', 'config.json');
-    const rawConfig = readFileSync(configPath, 'utf-8');
-    this.config = JSON.parse(rawConfig) as BothubConfig;
-
-    const apiKey = this.configService.get<string>('BOTHUB_API_KEY');
-    if (!apiKey) {
-      this.logger.error('BOTHUB_API_KEY is not defined');
-      throw new Error('BOTHUB_API_KEY is not defined');
-    }
-    this.apiKey = apiKey;
-  }
+    private readonly apiClient: BothubApiClientService,
+    private readonly generationResolver: BothubGenerationResolverService,
+    private readonly runtimeConfig: BothubRuntimeConfigService,
+  ) {}
 
   async generateQuestions(
     articleSubject: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const today = new Date().toLocaleDateString('ru-RU');
-    const settings = await this.getGenerationSettings('generate_questions');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'generate_questions',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        article_subject: articleSubject,
+        today: this.getToday(),
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*article_subject\s*}}/g, articleSubject)
-      .replace(/{{\s*today\s*}}/g, today);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: generate_questions]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async generateArticle(
@@ -141,30 +37,15 @@ export class BothubService {
     questionsContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const today = new Date().toLocaleDateString('ru-RU');
-    const settings = await this.getGenerationSettings('generate_article');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'generate_article',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        article_subject: articleSubject,
+        'QUESTION.content': questionsContent,
+        today: this.getToday(),
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*article_subject\s*}}/g, articleSubject)
-      .replace(/{{\s*QUESTION\.content\s*}}/g, questionsContent)
-      .replace(/{{\s*today\s*}}/g, today);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: generate_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async generateFactCheck(
@@ -172,29 +53,16 @@ export class BothubService {
     articleContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const today = new Date().toLocaleDateString('ru-RU');
-    const settings = await this.getGenerationSettings('generate_fact_check');
-    const prompts = await this.getPrompts(
+    void articleSubject;
+
+    return this.runStage(
       'generate_fact_check',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        'ARTICLE.content': articleContent,
+        today: this.getToday(),
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
-      .replace(/{{\s*today\s*}}/g, today);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: generate_fact_check]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async rewriteArticle(
@@ -203,29 +71,15 @@ export class BothubService {
     factCheckContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('rewrite_article');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'rewrite_article',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        article_subject: articleSubject,
+        'ARTICLE.content': articleContent,
+        'FACT_CHECK.content': factCheckContent,
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*article_subject\s*}}/g, articleSubject)
-      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
-      .replace(/{{\s*FACT_CHECK\.content\s*}}/g, factCheckContent);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: rewrite_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async seoRewriteArticle(
@@ -233,28 +87,14 @@ export class BothubService {
     seoTzContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('seo_rewrite_article');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'seo_rewrite_article',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        'SEO_TZ.content': seoTzContent,
+        'ARTICLE.content': articleContent,
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*SEO_TZ\.content\s*}}/g, seoTzContent)
-      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: seo_rewrite_article]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async generateRubrics(
@@ -262,86 +102,40 @@ export class BothubService {
     articleContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('generate_rubrics');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'generate_rubrics',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        article_subject: articleSubject,
+        'ARTICLE.content': articleContent,
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*article_subject\s*}}/g, articleSubject)
-      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: generate_rubrics]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async generateProducts(
     articleContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('generate_products');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'generate_products',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        'ARTICLE.content': articleContent,
+      },
       userContext,
     );
-
-    const prompt = prompts.user.replace(
-      /{{\s*ARTICLE\.content\s*}}/g,
-      articleContent,
-    );
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: generate_products]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async makeArticleUnique(
     articleContent: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('article_uniqueness');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'article_uniqueness',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        'ARTICLE.content': articleContent,
+      },
       userContext,
     );
-
-    const prompt = prompts.user.replace(
-      /{{\s*ARTICLE\.content\s*}}/g,
-      articleContent,
-    );
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: article_uniqueness]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async processUserPrompt(
@@ -349,427 +143,70 @@ export class BothubService {
     userPrompt: string,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const settings = await this.getGenerationSettings('uniq_prompt');
-    const prompts = await this.getPrompts(
+    return this.runStage(
       'uniq_prompt',
-      settings?.systemPromptId ?? null,
-      settings?.userPromptId ?? null,
+      {
+        'ARTICLE.content': articleContent,
+        'USER_PROMPT.content': userPrompt,
+      },
       userContext,
     );
-
-    const prompt = prompts.user
-      .replace(/{{\s*ARTICLE\.content\s*}}/g, articleContent)
-      .replace(/{{\s*USER_PROMPT\.content\s*}}/g, userPrompt);
-
-    if (this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true') {
-      return {
-        content: `[MOCK РЕЖИМ: uniq_prompt]\n\nСИСТЕМНЫЙ ПРОМПТ:\n${prompts.system || 'Нет'}\n\nПОЛЬЗОВАТЕЛЬСКИЙ ПРОМПТ:\n${prompt}`,
-        usage: 0,
-        mockSystemPrompt: prompts.system || undefined,
-        mockUserPrompt: prompt,
-      };
-    }
-
-    return this.sendRequest(prompt, settings, prompts.system, userContext);
   }
 
   async getBalance(
     userContext?: Record<string, unknown>,
   ): Promise<{ planType: string; availableBalance: number }> {
-    try {
-      await this.appLogger.log({
-        type: 'external_request',
-        integration: 'bothub',
-        method: 'GET',
-        url: 'https://bothub.chat/api/v2/auth/me',
-        ...userContext,
-      });
-      const response$ = this.httpService.get(
-        'https://bothub.chat/api/v2/auth/me',
-        {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-          },
-        },
-      );
-      const response = await lastValueFrom(response$);
-      await this.appLogger.log({
-        type: 'external_response',
-        integration: 'bothub',
-        method: 'GET',
-        url: 'https://bothub.chat/api/v2/auth/me',
-        status: response.status,
-        responseBody: response.data,
-        ...userContext,
-      });
-      const data = response.data as BothubBalanceResponse;
-
-      if (data.error?.message === 'UNAUTHORIZED') {
-        this.logger.error('Bothub API unauthorized');
-        throw new Error('Ошибка авторизации в Bothub');
-      }
-
-      return {
-        planType: data.subscription?.plan?.type || 'Неизвестно',
-        availableBalance: data.subscription?.available_balance || 0,
-      };
-    } catch (error) {
-      this.logger.error(`Failed to get balance: ${error}`);
-      const errorResponse = (
-        error as { response?: { status?: number; data?: unknown } }
-      ).response;
-      await this.appLogger.log({
-        type: 'external_error',
-        integration: 'bothub',
-        method: 'GET',
-        url: 'https://bothub.chat/api/v2/auth/me',
-        status: errorResponse?.status,
-        responseBody: errorResponse?.data,
-        error: error instanceof Error ? error.message : String(error),
-        ...userContext,
-      });
-      throw error;
-    }
+    return this.apiClient.getBalance(userContext);
   }
 
-  private async sendRequest(
-    userContent: string,
-    settings?: GenerationSettingsPayload | null,
-    systemContent?: string | null,
+  async getAvailableModels(
+    userContext?: Record<string, unknown>,
+  ): Promise<BothubModelOption[]> {
+    return this.apiClient.getAvailableModels(userContext);
+  }
+
+  private async runStage(
+    type: string,
+    values: Partial<Record<PromptPlaceholderKey, string>>,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
-    const model = settings?.model ?? this.config.api.model;
-    const temperature = settings?.temperature ?? this.config.api.temperature;
-    const max_tokens = settings?.maxTokens ?? this.config.api.max_tokens;
+    const settings = await this.generationResolver.getGenerationSettings(type);
+    const prompts = await this.generationResolver.getPrompts(
+      type,
+      settings?.systemPromptId ?? null,
+      settings?.userPromptId ?? null,
+      userContext,
+    );
+    const prompt = applyPromptTemplate(type, prompts.user, values);
 
-    const messages: any[] = [];
-    const fileContents =
-      settings?.files?.map((file) => ({
-        type: 'file',
-        file: {
-          filename: this.resolveFileName(file),
-          file_data: file,
-        },
-      })) ?? [];
-
-    if (systemContent) {
-      messages.push({
-        role: 'system',
-        content: systemContent,
-      });
+    if (this.runtimeConfig.isMockMode()) {
+      return this.createMockResult(type, prompts.system, prompt);
     }
 
-    if (fileContents.length > 0) {
-      const content = [
-        ...fileContents,
-        {
-          type: 'text',
-          text: userContent,
-        },
-      ];
-      messages.push({
-        role: 'user',
-        content,
-      });
-    } else {
-      messages.push({
-        role: 'user',
-        content: userContent,
-      });
-    }
+    return this.apiClient.sendGenerationRequest(
+      prompt,
+      settings,
+      prompts.system,
+      userContext,
+    );
+  }
 
-    const url = this.config.api.url;
-
-    let payload: any = {
-      model,
-      messages,
-      max_completion_tokens: max_tokens,
-      temperature,
-      bothub: {
-        include_usage: true,
-      },
-      plugins: [
-        {
-          id: 'web',
-          engine: 'native',
-          max_results: 5,
-        },
-      ],
+  private createMockResult(
+    type: string,
+    systemPrompt: string | null,
+    userPrompt: string,
+  ): GenerationResult {
+    return {
+      content: `[MOCK Р Р•Р–РРњ: ${type}]\n\nРЎРРЎРўР•РњРќР«Р™ РџР РћРњРџРў:\n${
+        systemPrompt || 'РќРµС‚'
+      }\n\nРџРћР›Р¬Р—РћР’РђРўР•Р›Р¬РЎРљРР™ РџР РћРњРџРў:\n${userPrompt}`,
+      usage: 0,
+      mockSystemPrompt: systemPrompt || undefined,
+      mockUserPrompt: userPrompt,
     };
-
-    if (
-      settings?.additionalPayload &&
-      typeof settings.additionalPayload === 'object' &&
-      !Array.isArray(settings.additionalPayload)
-    ) {
-      payload = {
-        ...payload,
-        ...settings.additionalPayload,
-      };
-    }
-
-    try {
-      await this.appLogger.log({
-        type: 'external_request',
-        integration: 'bothub',
-        method: 'POST',
-        url,
-        requestBody: payload,
-        ...userContext,
-      });
-      const response$ = this.httpService.post(url, payload, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        timeout: 1800000, // 30 minutes
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-      });
-
-      const response = await lastValueFrom(response$);
-      await this.appLogger.log({
-        type: 'external_response',
-        integration: 'bothub',
-        method: 'POST',
-        url,
-        status: response.status,
-        responseBody: response.data,
-        ...userContext,
-      });
-      const data = response.data as BothubResponse;
-      const content = data.choices?.[0]?.message?.content;
-      const usage = data.usage?.bothub?.caps;
-
-      if (usage !== undefined) {
-        this.logger.log(`Bothub usage: ${usage} caps`);
-      }
-
-      if (!content) {
-        this.logger.warn('Empty response from BotHub');
-        return { content: 'Пусто', usage };
-      }
-
-      const cleanContent = content.replace(
-        /\s*\(\s*Потрачено токенов:\s*.*\)\s*$/s,
-        '',
-      );
-
-      return { content: cleanContent, usage };
-    } catch (error) {
-      this.logger.error(`Failed to generate content: ${error}`);
-      const errorResponse = (
-        error as { response?: { status?: number; data?: unknown } }
-      ).response;
-      await this.appLogger.log({
-        type: 'external_error',
-        integration: 'bothub',
-        method: 'POST',
-        url: this.config.api.url,
-        status: errorResponse?.status,
-        responseBody: errorResponse?.data,
-        error: error instanceof Error ? error.message : String(error),
-        ...userContext,
-      });
-      throw error;
-    }
   }
 
-  private isAnthropicModel(model: string): boolean {
-    return model?.startsWith('claude-');
-  }
-
-  private resolveFileName(file: string): string {
-    if (file.startsWith('data:')) {
-      const mime = file.slice(5, file.indexOf(';'));
-      const ext = mime.split('/')[1] ?? 'bin';
-      return `file.${ext}`;
-    }
-    try {
-      const url = new URL(file);
-      const name = url.pathname.split('/').pop();
-      if (name) return name;
-    } catch {
-      const name = file.split('/').pop();
-      if (name) return name;
-    }
-    return 'file';
-  }
-
-  private async getGenerationSettings(
-    type: string,
-  ): Promise<GenerationSettingsPayload | null> {
-    const settings = await this.generationSettingsService.getByType(type);
-    if (settings) {
-      return settings;
-    }
-
-    const fallback = this.getFallbackSettings(type);
-    if (fallback) {
-      return fallback;
-    }
-
-    return null;
-  }
-
-  private async getPrompts(
-    type: string,
-    systemPromptId: string | null,
-    userPromptId: string | null,
-    userContext?: Record<string, unknown>,
-  ): Promise<{ system: string | null; user: string }> {
-    const prompts = this.config.prompts as Record<string, string>;
-    let userPrompt = prompts[type] ?? '';
-    let systemPrompt: string | null = null;
-
-    if (userPromptId) {
-      const outlinePrompt = await this.outlineService.getPromptById(
-        userPromptId,
-        userContext,
-      );
-      if (outlinePrompt) {
-        userPrompt = outlinePrompt;
-      }
-    }
-
-    if (systemPromptId) {
-      const outlinePrompt = await this.outlineService.getPromptById(
-        systemPromptId,
-        userContext,
-      );
-      if (outlinePrompt) {
-        systemPrompt = outlinePrompt;
-      }
-    }
-
-    return { system: systemPrompt, user: userPrompt };
-  }
-
-  private getFallbackSettings(type: string): GenerationSettingsPayload | null {
-    if (type === 'generate_article') {
-      const settings = this.config.article_settings;
-      if (!settings) return null;
-      return {
-        model: settings.model,
-        temperature: settings.temperature,
-        maxTokens: settings.max_tokens,
-        files: settings.files ?? [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'generate_fact_check') {
-      const settings = this.config.fact_check_settings;
-      if (!settings) return null;
-      return {
-        model: settings.model,
-        temperature: settings.temperature,
-        maxTokens: settings.max_tokens,
-        files: settings.files ?? [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'rewrite_article') {
-      const settings =
-        this.config.rewrite_settings ?? this.config.article_settings;
-      if (!settings) return null;
-      return {
-        model: settings.model,
-        temperature: settings.temperature,
-        maxTokens: settings.max_tokens,
-        files: settings.files ?? [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'seo_rewrite_article') {
-      const settings =
-        this.config.rewrite_settings ?? this.config.article_settings;
-      if (!settings) return null;
-      return {
-        model: settings.model,
-        temperature: settings.temperature,
-        maxTokens: settings.max_tokens,
-        files: settings.files ?? [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'generate_questions') {
-      return {
-        model: this.config.api.model,
-        temperature: this.config.api.temperature,
-        maxTokens: this.config.api.max_tokens,
-        files: [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'generate_rubrics') {
-      const settings = this.config.rubric_settings;
-      if (settings) {
-        return {
-          model: settings.model,
-          temperature: settings.temperature,
-          maxTokens: settings.max_tokens,
-          files: settings.files ?? [],
-          systemPromptId: null,
-          userPromptId: null,
-          additionalPayload: null,
-        };
-      }
-    }
-
-    if (type === 'generate_products') {
-      const settings = this.config.product_settings;
-      if (settings) {
-        return {
-          model: settings.model,
-          temperature: settings.temperature,
-          maxTokens: settings.max_tokens,
-          files: settings.files ?? [],
-          systemPromptId: null,
-          userPromptId: null,
-          additionalPayload: null,
-        };
-      }
-    }
-
-    if (type === 'article_uniqueness') {
-      return {
-        model: this.config.api.model,
-        temperature: this.config.api.temperature,
-        maxTokens: this.config.api.max_tokens,
-        files: [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    if (type === 'uniq_prompt') {
-      return {
-        model: this.config.api.model,
-        temperature: this.config.api.temperature,
-        maxTokens: this.config.api.max_tokens,
-        files: [],
-        systemPromptId: null,
-        userPromptId: null,
-        additionalPayload: null,
-      };
-    }
-
-    return null;
+  private getToday() {
+    return new Date().toLocaleDateString('ru-RU');
   }
 }

@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 
 export type GenerationSettingsDto = {
   type: string;
+  typeName: string | null;
   model: string;
   temperature: number;
   maxTokens: number;
@@ -30,26 +31,30 @@ export class GenerationSettingsService {
 
     return {
       type: settings.type,
+      typeName: settings.typeName,
       model: settings.model,
       temperature: settings.temperature,
       maxTokens: settings.maxTokens,
       files,
-      systemPromptId: settings.systemPromptId,
-      userPromptId: settings.userPromptId,
+      systemPromptId: this.normalizeNullableText(settings.systemPromptId),
+      userPromptId: this.normalizeNullableText(settings.userPromptId),
       additionalPayload: settings.additionalPayload as Record<string, any> | null,
     };
   }
 
   async getAll(): Promise<GenerationSettingsDto[]> {
-    const settings = await this.prisma.generationSettings.findMany();
+    const settings = await this.prisma.generationSettings.findMany({
+      orderBy: { type: 'asc' },
+    });
     return settings.map((s) => ({
       type: s.type,
+      typeName: s.typeName,
       model: s.model,
       temperature: s.temperature,
       maxTokens: s.maxTokens,
       files: this.parseFiles(s.files),
-      systemPromptId: s.systemPromptId,
-      userPromptId: s.userPromptId,
+      systemPromptId: this.normalizeNullableText(s.systemPromptId),
+      userPromptId: this.normalizeNullableText(s.userPromptId),
       additionalPayload: s.additionalPayload as Record<string, any> | null,
     }));
   }
@@ -58,12 +63,50 @@ export class GenerationSettingsService {
     type: string,
     data: Partial<Omit<GenerationSettingsDto, 'type'>>,
   ): Promise<GenerationSettingsDto> {
-    const { files, ...rest } = data;
-    const updateData: Prisma.GenerationSettingsUpdateInput = {
-      ...rest,
-      additionalPayload: rest.additionalPayload as Prisma.InputJsonValue,
-    };
-    if (files) {
+    const existing = await this.prisma.generationSettings.findUnique({
+      where: { type },
+      select: { id: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Generation settings not found');
+    }
+
+    const updateData: Prisma.GenerationSettingsUpdateInput = {};
+
+    if (data.typeName !== undefined) {
+      updateData.typeName = data.typeName;
+    }
+
+    if (data.model !== undefined) {
+      updateData.model = data.model;
+    }
+
+    if (data.temperature !== undefined) {
+      updateData.temperature = data.temperature;
+    }
+
+    if (data.maxTokens !== undefined) {
+      updateData.maxTokens = data.maxTokens;
+    }
+
+    if (data.systemPromptId !== undefined) {
+      updateData.systemPromptId = data.systemPromptId;
+    }
+
+    if (data.userPromptId !== undefined) {
+      updateData.userPromptId = data.userPromptId;
+    }
+
+    if (data.additionalPayload !== undefined) {
+      updateData.additionalPayload =
+        data.additionalPayload === null
+          ? Prisma.DbNull
+          : (data.additionalPayload as Prisma.InputJsonValue);
+    }
+
+    if (data.files !== undefined) {
+      const files = data.files.filter((value) => typeof value === 'string');
       updateData.files = JSON.stringify(files);
     }
 
@@ -74,12 +117,13 @@ export class GenerationSettingsService {
 
     return {
       type: settings.type,
+      typeName: settings.typeName,
       model: settings.model,
       temperature: settings.temperature,
       maxTokens: settings.maxTokens,
       files: this.parseFiles(settings.files),
-      systemPromptId: settings.systemPromptId,
-      userPromptId: settings.userPromptId,
+      systemPromptId: this.normalizeNullableText(settings.systemPromptId),
+      userPromptId: this.normalizeNullableText(settings.userPromptId),
       additionalPayload: settings.additionalPayload as Record<string, any> | null,
     };
   }
@@ -93,5 +137,14 @@ export class GenerationSettingsService {
     } catch {
       return [];
     }
+  }
+
+  private normalizeNullableText(value: string | null) {
+    if (value === null) {
+      return null;
+    }
+
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : null;
   }
 }
