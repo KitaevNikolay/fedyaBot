@@ -761,7 +761,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     const keyboard = new InlineKeyboard();
     keyboard
-      .url('Админка', 'https://fedyabot-admin.rilokobotfactory4.ru')
+      .url('Админка', 'https://fedya-bot.rilokobotfactory.ru/')
       .row();
 
     if (!session.scenarioId) {
