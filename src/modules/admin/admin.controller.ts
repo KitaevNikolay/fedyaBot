@@ -15,6 +15,7 @@ import {
 } from './admin-generation-settings.service';
 import { AdminService } from './admin.service';
 import { TelegramAuthDto } from './dto/telegram-auth.dto';
+import { UpdateAdminUserRoleDto } from './dto/update-admin-user-role.dto';
 import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import { PublicAdminRoute } from './public-admin-route.decorator';
 
@@ -111,6 +112,14 @@ export class AdminController {
     @Body() body: UpdateAdminUserStatusDto,
   ) {
     return this.adminService.updateUserStatus(id, body.isActive);
+  }
+
+  @Patch('users/:id/role')
+  updateUserRole(
+    @Param('id') id: string,
+    @Body() body: UpdateAdminUserRoleDto,
+  ) {
+    return this.adminService.updateUserRole(id, body.role);
   }
 
   @Post('auth/telegram')

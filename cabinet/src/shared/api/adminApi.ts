@@ -114,6 +114,12 @@ export const adminApi = {
       body: JSON.stringify({ isActive }),
     });
   },
+  updateUserRole(id: string, role: string) {
+    return request<AdminUser>(`/admin/users/${id}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    });
+  },
   verifyTelegramAuth(payload: TelegramAuthPayload) {
     return request<TelegramAuthResponse>('/admin/auth/telegram', {
       method: 'POST',
