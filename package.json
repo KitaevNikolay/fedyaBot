@@ -48,11 +48,13 @@
     "class-validator": "^0.14.3",
     "docx": "^9.5.3",
     "grammy": "^1.40.0",
+    "https-proxy-agent": "^7.0.6",
     "ioredis": "^5.9.3",
     "mammoth": "^1.7.1",
     "prisma": "5.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "socks-proxy-agent": "^8.0.5",
     "uuid": "^13.0.0"
   },
   "devDependencies": {

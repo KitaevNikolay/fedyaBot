@@ -45,7 +45,8 @@ export function UsersPage() {
   const { message } = App.useApp();
   const [users, setUsers] = useState<AnalyticsUser[]>([]);
   const [loading, setLoading] = useState(true);
-  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
+  const [updatingRoleId, setUpdatingRoleId] = useState<string | null>(null);
   const [selectedUser, setSelectedUser] = useState<AnalyticsUser | null>(null);
   const [overview, setOverview] = useState<AnalyticsUserOverview | null>(null);
   const [sessionDetails, setSessionDetails] = useState<AnalyticsSessionDetails | null>(null);
@@ -82,7 +83,7 @@ export function UsersPage() {
   }, [message]);
 
   const handleStatusChange = async (userId: string, isActive: boolean) => {
-    setUpdatingId(userId);
+    setUpdatingStatusId(userId);
     try {
       const updatedUser = await adminApi.updateUserStatus(userId, isActive);
       setUsers(current =>
@@ -107,7 +108,37 @@ export function UsersPage() {
           : 'Не удалось обновить статус пользователя.',
       );
     } finally {
-      setUpdatingId(null);
+      setUpdatingStatusId(null);
+    }
+  };
+
+  const handleRoleChange = async (userId: string, role: string) => {
+    setUpdatingRoleId(userId);
+    try {
+      const updatedUser = await adminApi.updateUserRole(userId, role);
+      setUsers(current =>
+        current.map(user =>
+          user.id === userId
+            ? {
+                ...user,
+                ...updatedUser,
+              }
+            : user,
+        ),
+      );
+      void message.success(
+        role === 'admin'
+          ? 'Роль пользователя изменена на admin.'
+          : 'Роль пользователя изменена на user.',
+      );
+    } catch (error) {
+      void message.error(
+        error instanceof Error
+          ? error.message
+          : 'Не удалось обновить роль пользователя.',
+      );
+    } finally {
+      setUpdatingRoleId(null);
     }
   };
 
@@ -158,6 +189,20 @@ export function UsersPage() {
 
   const columns: ColumnsType<AnalyticsUser> = [
     {
+      title: 'Role',
+      dataIndex: 'role',
+      key: 'role',
+      width: 140,
+      render: (_, user) =>
+        user.role === 'admin' ? (
+          <Tag color="processing" className="status-tag">
+            admin
+          </Tag>
+        ) : (
+          <Tag className="status-tag">user</Tag>
+        ),
+    },
+    {
       title: 'Пользователь',
       dataIndex: 'user',
       key: 'user',
@@ -171,7 +216,7 @@ export function UsersPage() {
     {
       title: 'Управление',
       key: 'actions',
-      width: 360,
+      width: 480,
       render: (_, user) => (
         <Space wrap>
           <Button
@@ -179,7 +224,7 @@ export function UsersPage() {
             icon={<CheckOutlined />}
             onClick={() => void handleStatusChange(user.id, true)}
             disabled={user.isActive}
-            loading={updatingId === user.id}
+            loading={updatingStatusId === user.id}
           >
             Одобрить
           </Button>
@@ -188,10 +233,21 @@ export function UsersPage() {
             icon={<StopOutlined />}
             onClick={() => void handleStatusChange(user.id, false)}
             disabled={!user.isActive}
-            loading={updatingId === user.id}
+            loading={updatingStatusId === user.id}
           >
             Заблокировать
           </Button>
+          <Select
+            value={user.role}
+            onChange={value => void handleRoleChange(user.id, value)}
+            options={[
+              { value: 'user', label: 'user' },
+              { value: 'admin', label: 'admin' },
+            ]}
+            loading={updatingRoleId === user.id}
+            disabled={updatingRoleId === user.id}
+            style={{ width: 120 }}
+          />
           <Button
             icon={<EyeOutlined />}
             onClick={() => void loadUserHistory(user)}

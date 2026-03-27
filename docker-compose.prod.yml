@@ -1,0 +1,76 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fedyabot-app:prod
+    container_name: fedyabot-app
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      NODE_OPTIONS: --dns-result-order=ipv4first
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(3000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  cabinet-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.cabinet-api
+    image: fedyabot-cabinet-api:prod
+    container_name: fedyabot-cabinet-api
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      CABINET_PORT: ${CABINET_PORT:-3001}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - data
+      - cabinet
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(process.env.CABINET_PORT || 3001,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  cabinet-frontend:
+    build:
+      context: .
+      dockerfile: cabinet/Dockerfile
+      args:
+        VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-}
+    image: fedyabot-cabinet-frontend:prod
+    container_name: fedyabot-cabinet-frontend
+    restart: unless-stopped
+    depends_on:
+      cabinet-api:
+        condition: service_started
+    networks:
+      - edge
+      - cabinet
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: edge
+      traefik.http.routers.fedyabot-cabinet.rule: Host(`${CABINET_HOST}`)
+      traefik.http.routers.fedyabot-cabinet.entrypoints: websecure
+      traefik.http.routers.fedyabot-cabinet.tls.certresolver: le
+      traefik.http.services.fedyabot-cabinet.loadbalancer.server.port: "80"
+
+networks:
+  edge:
+    external: true
+  data:
+    external: true
+  cabinet:

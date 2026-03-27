@@ -1,6 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -56,6 +57,37 @@ export class AdminService {
     const user = await this.prisma.user.update({
       where: { id },
       data: { isActive },
+      select: {
+        id: true,
+        telegramId: true,
+        firstName: true,
+        lastName: true,
+        username: true,
+        isActive: true,
+        role: true,
+        createdAt: true,
+      },
+    });
+
+    return {
+      ...user,
+      status: user.isActive ? 'approved' : 'blocked',
+    };
+  }
+
+  async updateUserRole(id: string, role: string) {
+    const existingUser = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+
+    if (!existingUser) {
+      throw new NotFoundException('User not found');
+    }
+
+    const user = await this.prisma.user.update({
+      where: { id },
+      data: { role },
       select: {
         id: true,
         telegramId: true,
