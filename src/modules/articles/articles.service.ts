@@ -23,7 +23,9 @@ export class ArticlesService {
     return this.prisma.article.findUnique({
       where: { id },
       include: {
-        additions: true,
+        additions: {
+          orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        },
         versions: {
           orderBy: { iteration: 'desc' },
           take: 1,
@@ -42,10 +44,19 @@ export class ArticlesService {
       await this.updateArticleCompetitors(articleId, content);
     }
 
-    return this.prisma.articleAddition.create({
-      data: {
+    return this.prisma.articleAddition.upsert({
+      where: {
+        articleId_type: {
+          articleId,
+          type,
+        },
+      },
+      create: {
         articleId,
         type,
+        content,
+      },
+      update: {
         content,
       },
     });
@@ -61,18 +72,22 @@ export class ArticlesService {
       await this.updateArticleCompetitors(articleId, content);
     }
 
-    const existing = await this.prisma.articleAddition.findFirst({
-      where: { articleId, type },
+    return this.prisma.articleAddition.upsert({
+      where: {
+        articleId_type: {
+          articleId,
+          type,
+        },
+      },
+      create: {
+        articleId,
+        type,
+        content,
+      },
+      update: {
+        content,
+      },
     });
-
-    if (existing) {
-      return this.prisma.articleAddition.update({
-        where: { id: existing.id },
-        data: { content },
-      });
-    }
-
-    return this.addAddition(articleId, type, content);
   }
 
   async createVersion(

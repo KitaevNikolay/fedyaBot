@@ -66,6 +66,7 @@ model ArticleAddition {
   article   Article             @relation(fields: [articleId], references: [id])
 
   @@index([articleId], map: "ArticleAddition_articleId_fkey")
+  @@unique([articleId, type], map: "ArticleAddition_articleId_type_key")
 }
 
 model TechnicalArticleAddition {
@@ -99,6 +100,7 @@ model ArticleVersion {
 model GenerationSettings {
   id             String   @id @default(uuid())
   type           String   @unique
+  typeName       String?  @map("type_name")
   model          String
   temperature    Float
   maxTokens      Int
@@ -108,6 +110,46 @@ model GenerationSettings {
   systemPromptId    String?
   userPromptId      String?
   additionalPayload Json?
+}
+
+model AnalyticsEvent {
+  id           String   @id @default(uuid())
+  dedupeKey    String   @unique
+  source       String   @default("runtime")
+  occurredAt   DateTime @default(now())
+  type         String
+  action       String?
+  stage        String?
+  integration  String?
+  method       String?
+  status       Int?
+  state        String?
+  error        String?  @db.LongText
+  text         String?  @db.LongText
+  callbackData String?
+  tokens       Float?
+  requestBody  Json?
+  responseBody Json?
+  metadata     Json?
+  raw          Json
+  telegramId   String?
+  username     String?
+  firstName    String?
+  lastName     String?
+  chatId       String?
+  userId       String?
+  sessionId    String?
+  articleId    String?
+  articleTitle String?  @db.Text
+  scenarioId   String?
+
+  @@index([occurredAt], map: "AnalyticsEvent_occurredAt_idx")
+  @@index([type], map: "AnalyticsEvent_type_idx")
+  @@index([stage], map: "AnalyticsEvent_stage_idx")
+  @@index([userId, occurredAt], map: "AnalyticsEvent_userId_occurredAt_idx")
+  @@index([sessionId, occurredAt], map: "AnalyticsEvent_sessionId_occurredAt_idx")
+  @@index([articleId, occurredAt], map: "AnalyticsEvent_articleId_occurredAt_idx")
+  @@map("AnalyticsEvents")
 }
 
 enum ArticleAdditionType {

@@ -11,15 +11,24 @@ type OutlineApiResponse<T> = {
   pagination?: unknown;
 };
 
-interface Collection {
+export interface Collection {
   id: string;
   name: string;
 }
 
-interface Document {
+export interface OutlineDocument {
   id: string;
   title: string;
   text: string;
+  url?: string | null;
+  urlId?: string | null;
+  collectionId?: string | null;
+}
+
+export interface PromptDocumentSummary {
+  id: string;
+  title: string;
+  url: string | null;
 }
 
 @Injectable()
@@ -177,8 +186,8 @@ export class OutlineService implements OnModuleInit {
     title: string,
     text: string,
     userContext?: Record<string, unknown>,
-  ): Promise<Document> {
-    return this.request<Document>(
+  ): Promise<OutlineDocument> {
+    return this.request<OutlineDocument>(
       'POST',
       'documents.create',
       {
@@ -194,12 +203,110 @@ export class OutlineService implements OnModuleInit {
   async getDocument(
     id: string,
     userContext?: Record<string, unknown>,
-  ): Promise<Document> {
-    return this.request<Document>(
+  ): Promise<OutlineDocument> {
+    return this.request<OutlineDocument>(
       'POST',
       'documents.info',
       { id },
       userContext,
+    );
+  }
+
+  async listDocuments(
+    collectionId?: string,
+    userContext?: Record<string, unknown>,
+  ): Promise<OutlineDocument[]> {
+    const payload = collectionId
+      ? {
+          collectionId,
+          sort: 'title',
+        }
+      : {
+          sort: 'title',
+        };
+
+    return this.request<OutlineDocument[]>(
+      'POST',
+      'documents.list',
+      payload,
+      userContext,
+    );
+  }
+
+  getWorkspaceUrl() {
+    return this.apiUrl.replace(/\/api$/, '');
+  }
+
+  async getPromptDocumentSummary(
+    id: string,
+    userContext?: Record<string, unknown>,
+  ): Promise<PromptDocumentSummary | null> {
+    try {
+      const document = await this.getDocument(id, userContext);
+      return this.toPromptDocumentSummary(document);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Failed to fetch Outline prompt metadata for ${id}: ${errorMessage}`,
+      );
+      return null;
+    }
+  }
+
+  async getPromptDocuments(
+    userContext?: Record<string, unknown>,
+  ): Promise<PromptDocumentSummary[]> {
+    const documentMap = new Map<string, PromptDocumentSummary>();
+
+    if (this.apiKey) {
+      try {
+        const collections = await this.listCollections(userContext);
+        const promptsCollection = collections.find(
+          (collection) => collection.name === 'prompts',
+        );
+
+        if (promptsCollection) {
+          const documents = await this.listDocuments(
+            promptsCollection.id,
+            userContext,
+          );
+
+          for (const document of documents) {
+            documentMap.set(
+              document.id,
+              this.toPromptDocumentSummary(document),
+            );
+          }
+        }
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Failed to load prompt list from Outline: ${errorMessage}`,
+        );
+      }
+    }
+
+    const mappedPromptIds = this.readMappedPromptIds();
+    const missingIds = mappedPromptIds.filter((id) => !documentMap.has(id));
+
+    if (missingIds.length > 0 && this.apiKey) {
+      const promptDocuments = await Promise.all(
+        missingIds.map((id) => this.getPromptDocumentSummary(id, userContext)),
+      );
+
+      for (const document of promptDocuments) {
+        if (!document) {
+          continue;
+        }
+
+        documentMap.set(document.id, document);
+      }
+    }
+
+    return Array.from(documentMap.values()).sort((left, right) =>
+      left.title.localeCompare(right.title, 'ru'),
     );
   }
 
@@ -293,5 +400,58 @@ export class OutlineService implements OnModuleInit {
       this.logger.error(`Failed to fetch prompt ${key}: ${errorMessage}`);
       return null;
     }
+  }
+
+  private readMappedPromptIds() {
+    if (!existsSync(this.mapConfigPath)) {
+      return [];
+    }
+
+    try {
+      const rawMap = readFileSync(this.mapConfigPath, 'utf-8');
+      const parsed = JSON.parse(rawMap) as unknown;
+
+      if (!parsed || typeof parsed !== 'object') {
+        return [];
+      }
+
+      return Object.values(parsed).filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      );
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Failed to read Outline prompt map: ${errorMessage}`);
+      return [];
+    }
+  }
+
+  private toPromptDocumentSummary(
+    document: OutlineDocument,
+  ): PromptDocumentSummary {
+    return {
+      id: document.id,
+      title: document.title?.trim() || document.id,
+      url: this.resolveDocumentUrl(document),
+    };
+  }
+
+  private resolveDocumentUrl(document: OutlineDocument) {
+    const workspaceUrl = this.getWorkspaceUrl();
+
+    if (document.url) {
+      if (/^https?:\/\//i.test(document.url)) {
+        return document.url;
+      }
+
+      const normalizedPath = document.url.replace(/^\/+/, '');
+      return `${workspaceUrl}/${normalizedPath}`;
+    }
+
+    if (document.urlId) {
+      return `${workspaceUrl}/doc/${document.urlId}`;
+    }
+
+    return null;
   }
 }

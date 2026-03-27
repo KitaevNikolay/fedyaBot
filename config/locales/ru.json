@@ -33,22 +33,7 @@
     "check_uniqueness": "Проверить текст на уникальность",
     "download_files": "Скачать файлы",
     "user_prompt": "Пользовательский промпт",
-    "admin": "Админка",
-    "admin_title": "Добрый день, {{firstName}}, добро пожаловать в админку!",
-    "admin_users": "Работа с пользователями",
-    "admin_settings": "Работа с настройками генерации",
-    "admin_prompts": "Работа с промптами",
-    "admin_back_to_main": "Назад к пользовательскому меню",
-    "admin_back_to_admin": "Назад к админскому меню",
-    "admin_users_list": "Просмотр списка пользователей",
     "attach_bitrix": "Прикрепить свой bitrix_id",
-    "admin_users_activate": "Активация/деактивация пользователей",
-    "admin_users_delete": "Удаление пользователей",
-    "admin_settings_view": "Просмотр текущих настроек",
-    "admin_settings_edit": "Изменение настроек",
-    "admin_settings_view_title": "Выберите тип генерации для просмотра:",
-    "admin_settings_edit_title": "Выберите тип генерации для изменения:",
-    "admin_settings_edit_param_title": "Выберите параметр для изменения:",
     "back": "Назад"
   },
   "settings_types": {
@@ -61,10 +46,6 @@
     "seo_rewrite_article": "SEO-оптимизация",
     "article_uniqueness": "Уникализация статьи",
     "uniq_prompt": "Свободный промпт"
-  },
-  "admin": {
-    "enter_new_value": "Введите новое значение для {{param}}:",
-    "setting_updated": "Параметр {{param}} был изменен на {{value}}."
   },
   "download_menu": {
     "title": "Доступные файлы для скачивания:",
@@ -153,3 +134,4 @@
   },
   "balance_not_implemented": "Функционал баланса в разработке"
 }
+

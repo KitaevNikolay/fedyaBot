@@ -31,16 +31,6 @@
     "seo_optimization": "seo_optimization",
     "check_uniqueness": "check_uniqueness",
     "download_files": "download_files",
-    "download_prefix": "download:",
-    "admin_menu": "admin_menu",
-    "admin_users": "admin_users",
-    "admin_settings": "admin_settings",
-    "admin_back_to_main": "admin_back_to_main",
-    "admin_back_to_admin": "admin_back_to_admin",
-    "admin_users_list": "admin_users_list",
-    "admin_users_activate": "admin_users_activate",
-    "admin_users_delete": "admin_users_delete",
-    "admin_settings_view": "admin_settings_view",
-    "admin_settings_edit": "admin_settings_edit"
+    "download_prefix": "download:"
   }
 }
