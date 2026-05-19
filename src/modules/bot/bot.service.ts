@@ -26,6 +26,12 @@ import { TechnicalArticleAdditionsService } from '../technical-article-additions
 import { TextRuService } from '../text-ru/text-ru.service';
 import { BitrixService } from '../bitrix/bitrix.service';
 import { UsersService } from '../users/users.service';
+import {
+  extractArticleBody,
+  extractArticleBodyWithMarkers,
+  findMissingImageMarkers,
+  restoreArticleMetadata,
+} from '../../common/utils/article-text.util';
 
 type UserContext = {
   title?: string;
@@ -357,6 +363,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const uploadArticleCallback =
       this.constantsService.get<string>('callbacks.upload_article') ??
       'upload_article';
+    const generateQuestionsChoiceCallback =
+      this.constantsService.get<string>('callbacks.generate_questions_choice') ??
+      'generate_questions_choice';
+    const uploadQuestionsChoiceCallback =
+      this.constantsService.get<string>('callbacks.upload_questions_choice') ??
+      'upload_questions_choice';
     const downloadFilesCallback =
       this.constantsService.get<string>('callbacks.download_files') ??
       'download_files';
@@ -401,6 +413,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     this.bot.callbackQuery(confirmTitleCallback, async (ctx) => {
       await this.handleConfirmTitle(ctx);
+    });
+    this.bot.callbackQuery(generateQuestionsChoiceCallback, async (ctx) => {
+      await this.handleGenerateQuestionsChoice(ctx);
+    });
+    this.bot.callbackQuery(uploadQuestionsChoiceCallback, async (ctx) => {
+      await this.handleUploadQuestionsChoice(ctx);
     });
 
     this.bot.callbackQuery(reenterTitleCallback, async (ctx) => {
@@ -1190,6 +1208,27 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (state === 'WAITING_FOR_QUESTIONS_CHOICE') {
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.generate_questions') || 'Сгенерировать вопросы',
+          this.constantsService.get<string>('callbacks.generate_questions_choice') ??
+            'generate_questions_choice',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.upload_questions') || 'Загрузить свои',
+          this.constantsService.get<string>('callbacks.upload_questions_choice') ??
+            'upload_questions_choice',
+        );
+      await ctx.reply(
+        this.localesService.t('article.questions_method_choice') ||
+          'Выберите вариант:',
+        { reply_markup: keyboard },
+      );
+      return;
+    }
+
     if (
       state === 'WAITING_FOR_QUESTIONS_FILE' ||
       state === 'WAITING_FOR_FACT_CHECK_FILE' ||
@@ -1435,10 +1474,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const title = context.title;
 
     await ctx.answerCallbackQuery();
-    await ctx.reply(
-      this.localesService.t('article.generating_questions') ||
-        'Генерирую вопросы, подождите...',
-    );
 
     // Create article in DB
     const article = await this.articlesService.create(user.id, title);
@@ -1448,6 +1483,52 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (session) {
       await this.sessionsService.updateArticle(session.id, article.id);
     }
+
+    await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_CHOICE');
+
+    const keyboard = new InlineKeyboard()
+      .text(
+        this.localesService.t('menu.generate_questions') || 'Сгенерировать вопросы',
+        this.constantsService.get<string>('callbacks.generate_questions_choice') ??
+          'generate_questions_choice',
+      )
+      .row()
+      .text(
+        this.localesService.t('menu.upload_questions') || 'Загрузить свои',
+        this.constantsService.get<string>('callbacks.upload_questions_choice') ??
+          'upload_questions_choice',
+      );
+
+    await ctx.reply(
+      this.localesService.t('article.questions_method_choice') ||
+        'Новые вопросы или загрузим ТЗ/вопросы вручную?',
+      { reply_markup: keyboard },
+    );
+  }
+
+  private async handleGenerateQuestionsChoice(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CHOICE') {
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.title || !context.articleId) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const { title, articleId } = context;
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_questions') ||
+        'Генерирую вопросы, подождите...',
+    );
 
     try {
       const questionsResult = await this.bothubService.generateQuestions(
@@ -1459,14 +1540,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         ctx,
         'generate_questions',
         questionsResult,
-        article.id,
+        articleId,
       );
       await this.sendGenerationResult(ctx, questionsResult, 'questions');
 
-      // Save context for regeneration/confirmation
       await this.setUserContext(user.id, {
         ...context,
-        articleId: article.id,
         questions: questionsResult.content,
       });
       await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_CONFIRMATION');
@@ -1501,6 +1580,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(error);
       await ctx.reply(this.localesService.t('errors.generation_failed'));
     }
+  }
+
+  private async handleUploadQuestionsChoice(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CHOICE') {
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_FILE');
+
+    await ctx.reply(
+      this.localesService.t('article.upload_questions') ||
+        'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
   }
 
   private async sendGenerationResult(
@@ -2286,17 +2385,33 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
+      const rawContent = articleAddition?.content || 'Mock Content for Uniqueness';
+      const { body, metadata } = extractArticleBodyWithMarkers(rawContent);
       const result = await this.bothubService.makeArticleUnique(
-        articleAddition?.content || 'Mock Content for Uniqueness',
+        body,
         this.getUserLogContext(ctx),
       );
 
-      await this.sendGenerationResult(ctx, result, 'unique_article');
+      const missingMarkers = findMissingImageMarkers(result.content, metadata);
+      if (missingMarkers.length > 0) {
+        this.logger.error(
+          `Uniquification lost image markers: ${missingMarkers.join(', ')}`,
+        );
+        throw new Error('LLM removed image markers during uniquification');
+      }
+
+      const restoredContent = restoreArticleMetadata(result.content, metadata);
+
+      await this.sendGenerationResult(
+        ctx,
+        { ...result, content: restoredContent },
+        'unique_article',
+      );
 
       await this.setUserContext(user.id, {
         articleId: article?.id,
         articleContent: articleAddition?.content,
-        rewrittenArticleContent: result.content,
+        rewrittenArticleContent: restoredContent,
       });
       await this.setUserState(user.id, 'WAITING_FOR_UNIQUENESS_CONFIRMATION');
 
@@ -2512,7 +2627,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.answerCallbackQuery();
     try {
       const textUid = await this.textRuService.createCheck(
-        articleAddition?.content || 'Mock Content for Uniqueness',
+        extractArticleBody(articleAddition?.content || 'Mock Content for Uniqueness'),
         this.getUserLogContext(ctx),
       );
       if (article) {
