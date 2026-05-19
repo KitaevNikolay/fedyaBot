@@ -2017,6 +2017,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!document) return;
 
     const state = await this.getUserState(user.id);
+    this.logger.log(`handleDocument: state=${state}, file=${document.file_name}`);
     const caption = ctx.message?.caption?.trim();
     if (this.isCancelCommand(caption)) {
       await this.handleCancel(ctx);
@@ -2031,7 +2032,11 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (!this.isFileUploadState(state)) {
+    if (state === 'WAITING_FOR_QUESTIONS_CHOICE') {
+      await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_FILE');
+    }
+
+    if (!this.isFileUploadState(state) && state !== 'WAITING_FOR_QUESTIONS_CHOICE') {
       return;
     }
 
@@ -2053,7 +2058,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const buffer = await this.downloadDocumentBuffer(document.file_id);
+    let buffer: Buffer | null;
+    try {
+      buffer = await this.downloadDocumentBuffer(document.file_id);
+    } catch (downloadError) {
+      this.logger.error(`downloadDocumentBuffer error: ${downloadError}`);
+      await ctx.reply(
+        this.localesService.t('errors.docx_read_failed') ||
+          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
     if (!buffer) {
       await ctx.reply(
         this.localesService.t('errors.docx_read_failed') ||
@@ -2062,7 +2077,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const text = await DocxUtil.extractText(buffer);
+    let text: string;
+    try {
+      text = await DocxUtil.extractText(buffer);
+    } catch (extractError) {
+      this.logger.error(`DocxUtil.extractText error: ${extractError}`);
+      await ctx.reply(
+        this.localesService.t('errors.docx_read_failed') ||
+          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
     if (!text) {
       await ctx.reply(
         this.localesService.t('errors.docx_empty') ||
@@ -2141,17 +2166,24 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     if (state === 'WAITING_FOR_QUESTIONS_FILE') {
       const context = await this.getUserContext(user.id);
+      this.logger.log(`handleDocument QUESTIONS_FILE: articleId=${context?.articleId}, title=${context?.title}`);
       if (!context || !context.articleId || !context.title) {
+        this.logger.error(`handleDocument QUESTIONS_FILE: missing context. context=${JSON.stringify(context)}`);
         await ctx.reply(this.localesService.t('errors.generation_failed'));
         return;
       }
-      await this.generateArticleFromQuestions(ctx, {
-        userId: user.id,
-        articleId: context.articleId,
-        title: context.title,
-        questions: text,
-        context: { ...context, questions: text },
-      });
+      try {
+        await this.generateArticleFromQuestions(ctx, {
+          userId: user.id,
+          articleId: context.articleId,
+          title: context.title,
+          questions: text,
+          context: { ...context, questions: text },
+        });
+      } catch (error) {
+        this.logger.error(`generateArticleFromQuestions error: ${error}`);
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+      }
       return;
     }
 
