@@ -1,0 +1,33 @@
+FROM node:20.19.0-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl
+
+COPY package*.json ./
+COPY prisma ./prisma
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+FROM node:20.19.0-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN mkdir -p /app/logs && chown -R appuser:appgroup /app/logs
+
+COPY package*.json ./
+COPY prisma ./prisma
+COPY config ./config
+COPY docs ./docs
+RUN npm install --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+USER appuser
+
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/cabinet.main"]

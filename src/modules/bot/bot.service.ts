@@ -1,0 +1,3202 @@
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import {
+  ArticleAdditionType,
+  TechnicalArticleAdditionState,
+} from '@prisma/client';
+import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { DocxUtil } from '../../common/utils/docx.util';
+import { ConstantsService } from '../../config/constants.service';
+import { LocalesService } from '../../config/locales.service';
+import { AppLoggerService } from '../../common/logger/app-logger.service';
+import { ArticlesService } from '../articles/articles.service';
+import { BothubService, GenerationResult } from '../bothub/bothub.service';
+import { RedisService } from '../redis/redis.service';
+import { ScenariosService } from '../scenarios/scenarios.service';
+import { SessionsService } from '../sessions/sessions.service';
+import { TechnicalArticleAdditionsService } from '../technical-article-additions/technical-article-additions.service';
+import { TextRuService } from '../text-ru/text-ru.service';
+import { BitrixService } from '../bitrix/bitrix.service';
+import { UsersService } from '../users/users.service';
+
+type UserContext = {
+  title?: string;
+  sameTitle?: boolean;
+  articleId?: string;
+  questions?: string;
+  articleContent?: string;
+  factCheckContent?: string;
+  rewrittenArticleContent?: string;
+  bitrixId?: string;
+};
+
+function buildTelegramFileUrl(
+  baseUrl: string | undefined,
+  token: string,
+  filePath: string,
+): string {
+  const normalizedBaseUrl = (baseUrl || 'https://api.telegram.org').replace(
+    /\/+$/,
+    '',
+  );
+  return `${normalizedBaseUrl}/file/bot${token}/${filePath}`;
+}
+
+@Injectable()
+export class BotService implements OnModuleInit, OnModuleDestroy {
+  private static readonly FILE_UPLOAD_STATES = new Set([
+    'WAITING_FOR_QUESTIONS_FILE',
+    'WAITING_FOR_FACT_CHECK_FILE',
+    'WAITING_FOR_SEO_TZ_FILE',
+    'WAITING_FOR_ARTICLE_FILE',
+  ]);
+
+  private bot: Bot<Context>;
+  private botToken: string | null = null;
+  private uniquenessInterval: NodeJS.Timeout | null = null;
+  private pollingStarted = false;
+  private readonly telegramApiBaseUrl?: string;
+  private readonly telegramProxyAgent?:
+    | HttpsProxyAgent<string>
+    | SocksProxyAgent;
+  private readonly logger = new Logger(BotService.name);
+
+  private isCancelCommand(text?: string | null) {
+    return /^\/cancel(?:@[\w_]+)?$/i.test(text?.trim() ?? '');
+  }
+
+  private isFileUploadState(state?: string | null) {
+    return typeof state === 'string' && BotService.FILE_UPLOAD_STATES.has(state);
+  }
+
+  private isCancelableState(state?: string | null) {
+    return typeof state === 'string' && state.startsWith('WAITING_FOR_');
+  }
+
+  private getFileUploadPrompt(state?: string | null) {
+    switch (state) {
+      case 'WAITING_FOR_QUESTIONS_FILE':
+        return (
+          this.localesService.t('article.upload_questions') ||
+          'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_FACT_CHECK_FILE':
+        return (
+          this.localesService.t('article.upload_fact_check') ||
+          'Пришлите факт-чек в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_SEO_TZ_FILE':
+        return (
+          this.localesService.t('article.seo_tz_request') ||
+          'Для сео-оптимизации пришлите ТЗ в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      case 'WAITING_FOR_ARTICLE_FILE':
+        return (
+          this.localesService.t('article.upload_article_request') ||
+          'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+        );
+      default:
+        return this.localesService.t('errors.invalid_docx_format');
+    }
+  }
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly usersService: UsersService,
+    private readonly sessionsService: SessionsService,
+    private readonly scenariosService: ScenariosService,
+    private readonly localesService: LocalesService,
+    private readonly constantsService: ConstantsService,
+    private readonly bothubService: BothubService,
+    private readonly articlesService: ArticlesService,
+    private readonly redisService: RedisService,
+    private readonly appLogger: AppLoggerService,
+    private readonly technicalArticleAdditionsService: TechnicalArticleAdditionsService,
+    private readonly textRuService: TextRuService,
+    private readonly bitrixService: BitrixService,
+  ) {
+    this.telegramApiBaseUrl = this.configService.get<string>(
+      'TELEGRAM_API_BASE_URL',
+    );
+    const telegramProxyUrl =
+      this.configService.get<string>('TELEGRAM_PROXY_URL');
+
+    if (telegramProxyUrl) {
+      this.telegramProxyAgent = telegramProxyUrl.startsWith('socks')
+        ? new SocksProxyAgent(telegramProxyUrl)
+        : new HttpsProxyAgent(telegramProxyUrl);
+    }
+  }
+
+  async onModuleInit() {
+    const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) {
+      throw new Error('TELEGRAM_BOT_TOKEN is required');
+    }
+
+    this.botToken = token;
+    this.bot = new Bot<Context>(
+      token,
+      this.telegramApiBaseUrl || this.telegramProxyAgent
+        ? {
+            client: {
+              ...(this.telegramApiBaseUrl
+                ? { apiRoot: this.telegramApiBaseUrl }
+                : {}),
+              ...(this.telegramProxyAgent
+                ? {
+                    baseFetchConfig: {
+                      agent: this.telegramProxyAgent as any,
+                      compress: true,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : undefined,
+    );
+    const webhookUrl = this.configService.get<string>('TELEGRAM_WEBHOOK_URL');
+    const startCommand =
+      this.constantsService.get<string>('commands.start') ?? 'start';
+    const cancelCommand =
+      this.constantsService.get<string>('commands.cancel') ?? 'cancel';
+    const menuCommand =
+      this.constantsService.get<string>('commands.menu') ?? 'menu';
+
+    this.bot.use(async (ctx, next) => {
+      // Deduplication to prevent multiple processing of the same update (e.g. on webhook retries)
+      if (ctx.update?.update_id) {
+        const updateId = ctx.update.update_id.toString();
+        const lockKey = `update_lock:${updateId}`;
+
+        // Use setnx (set if not exists) for atomic operation
+        const lockAcquired = await this.redisService['redis'].set(
+          lockKey,
+          '1',
+          'EX',
+          60,
+          'NX',
+        );
+
+        if (!lockAcquired) {
+          this.logger.log(
+            `Update ${updateId} is already being processed or finished, skipping`,
+          );
+          // Не вызываем next(), чтобы прервать обработку
+          return;
+        }
+      }
+
+      const userContext = this.getUserLogContext(ctx);
+      if (ctx.callbackQuery?.data) {
+        await this.appLogger.log({
+          type: 'user_action',
+          action: 'callback',
+          callbackData: ctx.callbackQuery.data,
+          ...userContext,
+        });
+      }
+      if (ctx.message?.text) {
+        await this.appLogger.log({
+          type: 'user_action',
+          action: 'message',
+          text: ctx.message.text,
+          ...userContext,
+        });
+      } else if (ctx.message) {
+        await this.appLogger.log({
+          type: 'user_action',
+          action: 'message',
+          messageType: 'non_text',
+          ...userContext,
+        });
+      }
+      const telegramId = ctx.from?.id?.toString();
+      if (telegramId) {
+        const user = await this.usersService.findByTelegramId(telegramId);
+        if (user) {
+          const state = await this.getUserState(user.id);
+          await this.appLogger.log({
+            type: 'user_state',
+            state,
+            ...userContext,
+          });
+        }
+      }
+      this.wrapBotMethods(ctx, userContext);
+      
+      try {
+        await next();
+      } catch (error) {
+        await this.appLogger.log({
+          type: 'bot_error',
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          ...userContext,
+        });
+        throw error;
+      }
+    });
+
+    // Commands
+    this.bot.command(startCommand, async (ctx) => {
+      await this.handleStart(ctx);
+    });
+    this.bot.command(cancelCommand, async (ctx) => {
+      await this.handleCancel(ctx);
+    });
+    this.bot.command(menuCommand, async (ctx) => {
+      await this.handleWorkWithArticle(ctx);
+    });
+
+    // Callbacks
+    const selectScenarioCallback =
+      this.constantsService.get<string>('callbacks.select_scenario') ??
+      'select_scenario';
+    const chooseAnotherScenarioCallback =
+      this.constantsService.get<string>('callbacks.choose_another_scenario') ??
+      'choose_another_scenario';
+    const scenarioPrefix =
+      this.constantsService.get<string>('callbacks.scenario_prefix') ??
+      'scenario:';
+
+    const workWithArticleCallback =
+      this.constantsService.get<string>('callbacks.work_with_article') ??
+      'work_with_article';
+    const createArticleCallback =
+      this.constantsService.get<string>('callbacks.create_article') ??
+      'create_article';
+    const checkBalanceCallback =
+      this.constantsService.get<string>('callbacks.check_balance') ??
+      'check_balance';
+    const mainMenuCallback =
+      this.constantsService.get<string>('callbacks.main_menu') ?? 'main_menu';
+    const confirmQuestionsCallback =
+      this.constantsService.get<string>('callbacks.confirm_questions') ??
+      'confirm_questions';
+    const editQuestionsCallback =
+      this.constantsService.get<string>('callbacks.edit_questions') ??
+      'edit_questions';
+    const confirmTitleCallback =
+      this.constantsService.get<string>('callbacks.confirm_title') ??
+      'confirm_title';
+    const reenterTitleCallback =
+      this.constantsService.get<string>('callbacks.reenter_title') ??
+      'reenter_title';
+    const confirmArticleCallback =
+      this.constantsService.get<string>('callbacks.confirm_article') ??
+      'confirm_article';
+    const restartProcessCallback =
+      this.constantsService.get<string>('callbacks.restart_process') ??
+      'restart_process';
+    const factCheckGenerationCallback =
+      this.constantsService.get<string>('callbacks.fact_check_generation') ??
+      'fact_check_generation';
+    const editFactCheckCallback =
+      this.constantsService.get<string>('callbacks.edit_fact_check') ??
+      'edit_fact_check';
+    const factCheckRewriteCallback =
+      this.constantsService.get<string>('callbacks.fact_check_rewrite') ??
+      'fact_check_rewrite';
+    const returnToArticleMenuCallback =
+      this.constantsService.get<string>('callbacks.return_to_article_menu') ??
+      'return_to_article_menu';
+    const confirmFactCheckCallback =
+      this.constantsService.get<string>('callbacks.confirm_fact_check') ??
+      'confirm_fact_check';
+    const confirmRewriteCallback =
+      this.constantsService.get<string>('callbacks.confirm_rewrite') ??
+      'confirm_rewrite';
+    const regenerateGenerationCallback =
+      this.constantsService.get<string>('callbacks.regenerate_generation') ??
+      'regenerate_generation';
+    const productsCallback =
+      this.constantsService.get<string>('callbacks.products') ?? 'products';
+    const rubricsCallback =
+      this.constantsService.get<string>('callbacks.rubrics') ?? 'rubrics';
+    const seoOptimizationCallback =
+      this.constantsService.get<string>('callbacks.seo_optimization') ??
+      'seo_optimization';
+    const createBitrixTaskCallback =
+      this.constantsService.get<string>('callbacks.create_bitrix_task') ??
+      'create_bitrix_task';
+    const attachBitrixIdCallback =
+      this.constantsService.get<string>('callbacks.attach_bitrix_id') ??
+      'attach_bitrix_id';
+    const checkUniquenessCallback =
+      this.constantsService.get<string>('callbacks.check_uniqueness') ??
+      'check_uniqueness';
+    const articleUniquenessCallback =
+      this.constantsService.get<string>('callbacks.article_uniqueness') ??
+      'article_uniqueness';
+    const confirmArticleUniquenessCallback =
+      this.constantsService.get<string>(
+        'callbacks.confirm_article_uniqueness',
+      ) ?? 'confirm_article_uniqueness';
+    const cancelArticleUniquenessCallback =
+      this.constantsService.get<string>(
+        'callbacks.cancel_article_uniqueness',
+      ) ?? 'cancel_article_uniqueness';
+    const userPromptCallback =
+      this.constantsService.get<string>('callbacks.user_prompt') ??
+      'user_prompt';
+    const confirmUserPromptCallback =
+      this.constantsService.get<string>('callbacks.confirm_user_prompt') ??
+      'confirm_user_prompt';
+    const cancelUserPromptCallback =
+      this.constantsService.get<string>('callbacks.cancel_user_prompt') ??
+      'cancel_user_prompt';
+    const uploadArticleCallback =
+      this.constantsService.get<string>('callbacks.upload_article') ??
+      'upload_article';
+    const downloadFilesCallback =
+      this.constantsService.get<string>('callbacks.download_files') ??
+      'download_files';
+    const downloadPrefix =
+      this.constantsService.get<string>('callbacks.download_prefix') ??
+      'download:';
+    this.bot.callbackQuery(
+      [selectScenarioCallback, chooseAnotherScenarioCallback, mainMenuCallback],
+      async (ctx) => {
+        if (ctx.callbackQuery.data === mainMenuCallback) {
+          await this.handleStart(ctx);
+          await ctx.answerCallbackQuery();
+        } else {
+          await this.handleSelectScenario(ctx);
+        }
+      },
+    );
+
+    this.bot.callbackQuery(checkBalanceCallback, async (ctx) => {
+      try {
+        const balance = await this.bothubService.getBalance(
+          this.getUserLogContext(ctx),
+        );
+        await ctx.reply(
+          `Ваш тариф: ${balance.planType}\nТекущий баланс: ${balance.availableBalance} Caps`,
+        );
+      } catch (error) {
+        this.logger.error(`Error checking balance: ${error}`);
+        await ctx.reply('Ошибка получения баланса. Попробуйте позже.');
+      }
+      await ctx.answerCallbackQuery();
+    });
+
+    this.bot.callbackQuery(workWithArticleCallback, async (ctx) => {
+      await this.handleWorkWithArticle(ctx);
+    });
+
+    this.bot.callbackQuery(createArticleCallback, async (ctx) => {
+      this.logger.log(`Received callback: ${createArticleCallback}`);
+      await this.handleCreateArticle(ctx);
+    });
+
+    this.bot.callbackQuery(confirmTitleCallback, async (ctx) => {
+      await this.handleConfirmTitle(ctx);
+    });
+
+    this.bot.callbackQuery(reenterTitleCallback, async (ctx) => {
+      await this.handleCreateArticle(ctx);
+    });
+
+    this.bot.callbackQuery(confirmQuestionsCallback, async (ctx) => {
+      await this.handleConfirmQuestions(ctx);
+    });
+
+    this.bot.callbackQuery(editQuestionsCallback, async (ctx) => {
+      await this.handleEditQuestions(ctx);
+    });
+
+    this.bot.callbackQuery(confirmArticleCallback, async (ctx) => {
+      await this.handleConfirmArticle(ctx);
+    });
+
+    this.bot.callbackQuery(restartProcessCallback, async (ctx) => {
+      await this.handleCreateArticle(ctx);
+    });
+
+    this.bot.callbackQuery(factCheckGenerationCallback, async (ctx) => {
+      await this.handleFactCheckGeneration(ctx);
+    });
+
+    this.bot.callbackQuery(editFactCheckCallback, async (ctx) => {
+      await this.handleEditFactCheck(ctx);
+    });
+
+    this.bot.callbackQuery(factCheckRewriteCallback, async (ctx) => {
+      await this.handleFactCheckRewrite(ctx);
+    });
+
+    this.bot.callbackQuery(returnToArticleMenuCallback, async (ctx) => {
+      await this.handleWorkWithArticle(ctx);
+    });
+
+    this.bot.callbackQuery(confirmFactCheckCallback, async (ctx) => {
+      await this.handleConfirmFactCheck(ctx);
+    });
+
+    this.bot.callbackQuery(confirmRewriteCallback, async (ctx) => {
+      await this.handleConfirmRewrite(ctx);
+    });
+
+    this.bot.callbackQuery(regenerateGenerationCallback, async (ctx) => {
+      await this.handleRegenerate(ctx);
+    });
+
+    this.bot.callbackQuery(productsCallback, async (ctx) => {
+      await this.handleProducts(ctx);
+    });
+
+    this.bot.callbackQuery(rubricsCallback, async (ctx) => {
+      await this.handleRubrics(ctx);
+    });
+
+    this.bot.callbackQuery(seoOptimizationCallback, async (ctx) => {
+      await this.handleSeoOptimization(ctx);
+    });
+
+    this.bot.callbackQuery(createBitrixTaskCallback, async (ctx) => {
+      await this.handleCreateBitrixTask(ctx);
+    });
+
+    this.bot.callbackQuery(attachBitrixIdCallback, async (ctx) => {
+      await this.handleAttachBitrixId(ctx);
+    });
+
+    this.bot.callbackQuery(checkUniquenessCallback, async (ctx) => {
+      await this.handleCheckUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(articleUniquenessCallback, async (ctx) => {
+      await this.handleArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(confirmArticleUniquenessCallback, async (ctx) => {
+      await this.handleConfirmArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(cancelArticleUniquenessCallback, async (ctx) => {
+      await this.handleCancelArticleUniqueness(ctx);
+    });
+
+    this.bot.callbackQuery(userPromptCallback, async (ctx) => {
+      await this.handleUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(confirmUserPromptCallback, async (ctx) => {
+      await this.handleConfirmUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(cancelUserPromptCallback, async (ctx) => {
+      await this.handleCancelUserPrompt(ctx);
+    });
+
+    this.bot.callbackQuery(uploadArticleCallback, async (ctx) => {
+      await this.handleUploadArticle(ctx);
+    });
+
+    this.bot.callbackQuery(downloadFilesCallback, async (ctx) => {
+      await this.handleDownloadMenu(ctx);
+    });
+
+    this.bot.callbackQuery(new RegExp(`^${downloadPrefix}`), async (ctx) => {
+      await this.handleDownloadItem(ctx);
+    });
+
+    this.bot.callbackQuery(new RegExp(`^${scenarioPrefix}`), async (ctx) => {
+      await this.handleScenarioSelected(ctx);
+    });
+
+    this.bot.on('message:text', async (ctx) => {
+      await this.handleMessage(ctx);
+    });
+
+    this.bot.on('message:document', async (ctx) => {
+      await this.handleDocument(ctx);
+    });
+
+    try {
+      // Don't await setMyCommands to prevent blocking app startup if Telegram API hangs
+      this.bot.api.setMyCommands([
+        {
+          command: startCommand,
+          description: this.localesService.t('commands.start'),
+        },
+        {
+          command: cancelCommand,
+          description: this.localesService.t('commands.cancel'),
+        },
+        {
+          command: menuCommand,
+          description: this.localesService.t('commands.menu'),
+        },
+      ]).catch(error => {
+        this.logger.warn(`Failed to set bot commands: ${error}`);
+      });
+    } catch (error) {
+      this.logger.warn(`Failed to set bot commands synchronously: ${error}`);
+    }
+
+    if (webhookUrl) {
+      this.bot.api.setWebhook(webhookUrl).then(() => {
+        this.logger.log('Telegram webhook set');
+      }).catch(error => {
+        this.logger.warn(`Failed to set Telegram webhook: ${error}`);
+      });
+    } else {
+      this.startPolling();
+    }
+
+    this.uniquenessInterval = setInterval(() => {
+      void this.processUniquenessChecks();
+    }, 45000);
+
+    this.bot.catch(async (error) => {
+      await this.appLogger.log({
+        type: 'bot_error',
+        error:
+          error.error instanceof Error
+            ? error.error.message
+            : String(error.error),
+        stack: error.error instanceof Error ? error.error.stack : undefined,
+        update: error.ctx?.update,
+      });
+    });
+  }
+
+  async onModuleDestroy() {
+    if (this.uniquenessInterval) {
+      clearInterval(this.uniquenessInterval);
+      this.uniquenessInterval = null;
+    }
+    if (this.bot && this.pollingStarted) {
+      await this.bot.stop();
+    }
+  }
+
+  getBot(): Bot<Context> {
+    if (!this.bot) {
+      throw new Error('Bot is not initialized');
+    }
+    return this.bot;
+  }
+
+  // Redis helpers
+  private async getUserState(userId: string): Promise<string | null> {
+    return this.redisService.get(`state:${userId}`);
+  }
+
+  private async setUserState(userId: string, state: string): Promise<void> {
+    await this.redisService.set(`state:${userId}`, state, 21600);
+  }
+
+  private async deleteUserState(userId: string): Promise<void> {
+    await this.redisService.del(`state:${userId}`);
+  }
+
+  private async getUserContext(userId: string): Promise<UserContext | null> {
+    return this.redisService.getJson<UserContext>(`context:${userId}`);
+  }
+
+  private async setUserContext(
+    userId: string,
+    context: UserContext,
+  ): Promise<void> {
+    await this.redisService.setJson(`context:${userId}`, context, 21600);
+  }
+
+  private async deleteUserContext(userId: string): Promise<void> {
+    await this.redisService.del(`context:${userId}`);
+  }
+
+  private getUserLogContext(ctx: Context) {
+    return {
+      telegramId: ctx.from?.id,
+      username: ctx.from?.username,
+      firstName: ctx.from?.first_name,
+      lastName: ctx.from?.last_name,
+      chatId: ctx.chat?.id,
+    };
+  }
+
+  private getUserProfile(ctx: Context) {
+    return {
+      username: ctx.from?.username,
+      firstName: ctx.from?.first_name,
+      lastName: ctx.from?.last_name,
+    };
+  }
+
+  private async logGenerationError(
+    ctx: Context,
+    stage: string,
+    error: unknown,
+  ) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    await this.appLogger.log({
+      type: 'generation_error',
+      stage,
+      error: errorMessage,
+      stack: errorStack,
+      ...this.getUserLogContext(ctx),
+    });
+  }
+
+  private async logGenerationResultEvent(
+    ctx: Context,
+    generationType: string,
+    result: GenerationResult,
+    articleId?: string,
+  ) {
+    await this.appLogger.log({
+      type: 'generation_result',
+      stage: generationType,
+      articleId,
+      text: result.content.slice(0, 1000),
+      ...this.getUserLogContext(ctx),
+    });
+  }
+
+  private wrapBotMethods(ctx: Context, userContext: Record<string, unknown>) {
+    const reply = ctx.reply.bind(ctx) as unknown as Context['reply'];
+    ctx.reply = (async (...args: Parameters<Context['reply']>) => {
+      const [text] = args;
+      await this.appLogger.log({
+        type: 'bot_reply',
+        method: 'reply',
+        text,
+        ...userContext,
+      });
+      return reply(...args);
+    }) as Context['reply'];
+    const replyWithDocument = ctx.replyWithDocument.bind(
+      ctx,
+    ) as unknown as Context['replyWithDocument'];
+    ctx.replyWithDocument = (async (
+      ...args: Parameters<Context['replyWithDocument']>
+    ) => {
+      const [document] = args;
+      const fileName =
+        document instanceof InputFile ? document.filename : undefined;
+      await this.appLogger.log({
+        type: 'bot_reply',
+        method: 'replyWithDocument',
+        fileName,
+        ...userContext,
+      });
+      return replyWithDocument(...args);
+    }) as Context['replyWithDocument'];
+    const answerCallbackQuery = ctx.answerCallbackQuery.bind(
+      ctx,
+    ) as unknown as Context['answerCallbackQuery'];
+    ctx.answerCallbackQuery = (async (
+      ...args: Parameters<Context['answerCallbackQuery']>
+    ) => {
+      const [data] = args;
+      await this.appLogger.log({
+        type: 'bot_reply',
+        method: 'answerCallbackQuery',
+        data,
+        ...userContext,
+      });
+      return answerCallbackQuery(...args);
+    }) as Context['answerCallbackQuery'];
+    if (ctx.editMessageText) {
+      const editMessageText = ctx.editMessageText.bind(
+        ctx,
+      ) as unknown as Context['editMessageText'];
+      ctx.editMessageText = (async (
+        ...args: Parameters<Context['editMessageText']>
+      ) => {
+        const [text] = args;
+        await this.appLogger.log({
+          type: 'bot_reply',
+          method: 'editMessageText',
+          text,
+          ...userContext,
+        });
+        return editMessageText(...args);
+      }) as Context['editMessageText'];
+    }
+  }
+
+  private async handleStart(ctx: Context, messageText?: string) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) {
+      return;
+    }
+
+    const profile = this.getUserProfile(ctx);
+    let user = await this.usersService.findByTelegramId(telegramId);
+
+    // Scenario 1: User not registered (first time)
+    if (!user) {
+      user = await this.usersService.createInactive(telegramId, profile);
+      await ctx.reply(this.localesService.t('account_pending'));
+      return;
+    }
+
+    await this.usersService.updateProfile(telegramId, profile);
+
+    // Scenario 2: User registered but not active
+    if (!user.isActive) {
+      await ctx.reply(this.localesService.t('account_not_active'));
+      return;
+    }
+
+    // Scenario 3: User registered and active (Session logic)
+    let session = await this.sessionsService.findActive(user.id);
+    if (!session) {
+      session = await this.sessionsService.create(user.id);
+    }
+
+    const keyboard = new InlineKeyboard();
+    keyboard
+      .url('Админка', 'https://fedya-bot.rilokobotfactory.ru/')
+      .row();
+
+    if (!session.scenarioId) {
+      keyboard
+        .text(
+          this.localesService.t('menu.choose_scenario'),
+          this.constantsService.get<string>('callbacks.select_scenario'),
+        )
+        .row();
+      keyboard
+        .text(
+          this.localesService.t('menu.attach_bitrix'),
+          this.constantsService.get<string>('callbacks.attach_bitrix_id') ??
+            'attach_bitrix_id',
+        )
+        .row();
+      keyboard
+        .text(
+          this.localesService.t('menu.check_balance'),
+          this.constantsService.get<string>('callbacks.check_balance'),
+        )
+        .row();
+    } else {
+      keyboard
+        .text(
+          this.localesService.t('menu.choose_another_scenario'),
+          this.constantsService.get<string>(
+            'callbacks.choose_another_scenario',
+          ) ?? 'choose_another_scenario',
+        )
+        .row();
+      keyboard
+        .text(
+          this.localesService.t('menu.work_with_article'),
+          this.constantsService.get<string>('callbacks.work_with_article'),
+        )
+        .row();
+      keyboard
+        .text(
+          this.localesService.t('menu.attach_bitrix'),
+          this.constantsService.get<string>('callbacks.attach_bitrix_id') ??
+            'attach_bitrix_id',
+        )
+        .row();
+      keyboard
+        .text(
+          this.localesService.t('menu.check_balance'),
+          this.constantsService.get<string>('callbacks.check_balance'),
+        )
+        .row();
+    }
+
+    const text = messageText || this.localesService.t('menu.title');
+
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      try {
+        await ctx.editMessageText(text, { reply_markup: keyboard });
+      } catch (e) {
+        this.logger.warn(`Failed to edit message: ${e}`);
+        await ctx.reply(text, { reply_markup: keyboard });
+      }
+    } else {
+      await ctx.reply(text, { reply_markup: keyboard });
+    }
+  }
+
+  // Scenario 4: User selects scenario
+  private async handleSelectScenario(ctx: Context) {
+    const scenarios = await this.scenariosService.findAll();
+    const keyboard = new InlineKeyboard();
+    const scenarioPrefix =
+      this.constantsService.get<string>('callbacks.scenario_prefix') ??
+      'scenario:';
+
+    for (const scenario of scenarios) {
+      keyboard.text(scenario.name, `${scenarioPrefix}${scenario.id}`).row();
+    }
+
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      try {
+        await ctx.editMessageText(this.localesService.t('scenarios.title'), {
+          reply_markup: keyboard,
+        });
+      } catch (e) {
+        this.logger.warn(`Failed to edit message: ${e}`);
+        await ctx.reply(this.localesService.t('scenarios.title'), {
+          reply_markup: keyboard,
+        });
+      }
+    } else {
+      await ctx.reply(this.localesService.t('scenarios.title'), {
+        reply_markup: keyboard,
+      });
+    }
+    await ctx.answerCallbackQuery();
+  }
+
+  private async handleScenarioSelected(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+
+    const callbackData = ctx.callbackQuery?.data;
+    const scenarioPrefix =
+      this.constantsService.get<string>('callbacks.scenario_prefix') ??
+      'scenario:';
+
+    if (!callbackData || !callbackData.startsWith(scenarioPrefix)) {
+      return;
+    }
+
+    const scenarioId = callbackData.replace(scenarioPrefix, '');
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (session) {
+      await this.sessionsService.updateScenario(session.id, scenarioId);
+    } else {
+      // Should not happen normally if flow is followed, but safe to handle
+      const newSession = await this.sessionsService.create(user.id);
+      await this.sessionsService.updateScenario(newSession.id, scenarioId);
+    }
+
+    const scenario = await this.scenariosService.findById(scenarioId);
+    const scenarioName = scenario ? scenario.name : 'Unknown';
+
+    await this.handleStart(
+      ctx,
+      this.localesService.t('scenarios.selected', { scenario: scenarioName }),
+    );
+    await ctx.answerCallbackQuery();
+  }
+
+  // Scenario 6: User works with article
+  private async handleWorkWithArticle(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    // Reset any state when returning to menu
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.scenarioId) return;
+
+    const scenario = await this.scenariosService.findById(session.scenarioId);
+    const scenarioName = scenario ? scenario.name : 'Unknown';
+
+    let articleTitle = 'Не выбрана';
+    let hasArticle = false;
+    let hasFactCheck = false;
+    let hasBitrixTask = false;
+    let uniquenessStatus = this.localesService.t(
+      'article_menu.uniqueness_not_checked',
+    );
+
+    if (session.articleId) {
+      const article = await this.articlesService.findById(session.articleId);
+      if (article) {
+        articleTitle = article.title;
+        const articleAddition = article.additions.find(
+          (a) => a.type === ArticleAdditionType.ARTICLE,
+        );
+        if (articleAddition) {
+          hasArticle = true;
+        }
+        const factCheckAddition = article.additions.find(
+          (a) => a.type === ArticleAdditionType.FACT_CHECK,
+        );
+        if (factCheckAddition) {
+          hasFactCheck = true;
+        }
+
+        const bitrixTaskAddition = article.additions.find(
+          (a) => a.type === ArticleAdditionType.BITRIX_TASK,
+        );
+        if (bitrixTaskAddition) {
+          hasBitrixTask = true;
+        }
+
+        const uniqAddition = article.additions.find(
+          (a) => a.type === ArticleAdditionType.ARTICLE_UNIQ_CHECK,
+        );
+        const technicalAddition =
+          await this.technicalArticleAdditionsService.findLatestByArticleId(
+            article.id,
+          );
+
+        const inProgressStates = new Set<TechnicalArticleAdditionState>([
+          TechnicalArticleAdditionState.NEW,
+          TechnicalArticleAdditionState.RUNNING,
+          TechnicalArticleAdditionState.PENDING,
+        ]);
+
+        if (
+          technicalAddition &&
+          inProgressStates.has(technicalAddition.state)
+        ) {
+          uniquenessStatus = this.localesService.t(
+            'article_menu.uniqueness_in_progress',
+          );
+        } else if (
+          technicalAddition?.state === TechnicalArticleAdditionState.ERROR
+        ) {
+          uniquenessStatus = this.localesService.t(
+            'article_menu.uniqueness_need_repeat',
+          );
+        } else if (
+          uniqAddition &&
+          articleAddition &&
+          articleAddition.updatedAt > uniqAddition.updatedAt
+        ) {
+          uniquenessStatus = this.localesService.t(
+            'article_menu.uniqueness_need_repeat',
+          );
+        } else if (uniqAddition?.content) {
+          const match = uniqAddition.content.match(/\d+([.,]\d+)?/);
+          const percent = match
+            ? match[0].replace(',', '.')
+            : uniqAddition.content;
+          uniquenessStatus = this.localesService.t(
+            'article_menu.uniqueness_value',
+            { percent },
+          );
+        }
+      }
+    }
+
+    const nextStep = !hasArticle
+      ? this.localesService.t('article_menu.next_step_article')
+      : hasFactCheck
+        ? this.localesService.t('article_menu.next_step_products')
+        : this.localesService.t('article_menu.next_step_fact_check');
+
+    const text = this.localesService.t('article_menu.title', {
+      scenario: scenarioName,
+      article: articleTitle,
+      nextStep,
+      uniqueness: uniquenessStatus,
+    });
+
+    const keyboard = new InlineKeyboard();
+
+    // Row 1: Create or upload article
+    keyboard
+      .text(
+        this.localesService.t('menu.create_article'),
+        this.constantsService.get<string>('callbacks.create_article') ??
+          'create_article',
+      )
+      .text(
+        this.localesService.t('menu.upload_article') ?? 'Загрузить статью',
+        this.constantsService.get<string>('callbacks.upload_article') ??
+          'upload_article',
+      )
+      .row();
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+
+    // Row 2: Fact check (if article exists)
+    if (hasArticle || isMockMode) {
+      keyboard.text(
+        this.localesService.t('menu.fact_check_generation') ??
+          'Факт-чек (генерация)',
+        this.constantsService.get<string>('callbacks.fact_check_generation') ??
+          'fact_check_generation',
+      );
+
+      if (hasFactCheck || isMockMode) {
+        keyboard.text(
+          this.localesService.t('menu.fact_check_rewrite') ??
+            'Факт-чек (переписать статью)',
+          this.constantsService.get<string>('callbacks.fact_check_rewrite') ??
+            'fact_check_rewrite',
+        );
+      }
+      keyboard.row();
+
+      if (hasFactCheck || isMockMode) {
+        keyboard.text(
+          this.localesService.t('menu.products') ?? 'Продукты',
+          this.constantsService.get<string>('callbacks.products') ?? 'products',
+        );
+        keyboard.text(
+          this.localesService.t('menu.rubrics') ?? 'Рубрики',
+          this.constantsService.get<string>('callbacks.rubrics') ?? 'rubrics',
+        );
+        keyboard.text(
+          this.localesService.t('menu.seo_optimization') ?? 'SEO оптимизация',
+          this.constantsService.get<string>('callbacks.seo_optimization') ??
+            'seo_optimization',
+        );
+        keyboard.row();
+      }
+
+      keyboard.text(
+        this.localesService.t('menu.article_uniqueness') ??
+          'Уникализация статьи',
+        this.constantsService.get<string>('callbacks.article_uniqueness') ??
+          'article_uniqueness',
+      );
+      keyboard.row();
+
+      keyboard.text(
+        this.localesService.t('menu.check_uniqueness') ??
+          'Проверить текст на уникальность',
+        this.constantsService.get<string>('callbacks.check_uniqueness') ??
+          'check_uniqueness',
+      );
+      keyboard.row();
+
+      keyboard.text(
+        this.localesService.t('menu.user_prompt') ?? 'Свободный промпт',
+        this.constantsService.get<string>('callbacks.user_prompt') ??
+          'user_prompt',
+      );
+      keyboard.row();
+
+      keyboard.text(
+        this.localesService.t('menu.download_files') ?? 'Скачать файлы',
+        this.constantsService.get<string>('callbacks.download_files') ??
+          'download_files',
+      );
+      keyboard.row();
+
+      if ((hasFactCheck || isMockMode) && !hasBitrixTask) {
+        keyboard.text(
+          this.localesService.t('article.create_bitrix_task') ??
+            'Создать задачу',
+          this.constantsService.get<string>('callbacks.create_bitrix_task') ??
+            'create_bitrix_task',
+        );
+        keyboard.row();
+      }
+    }
+
+    // Row 6: Main menu, Check balance
+    keyboard.text(
+      this.localesService.t('menu.main_menu'),
+      this.constantsService.get<string>('callbacks.main_menu') ?? 'main_menu',
+    );
+    keyboard
+      .text(
+        this.localesService.t('menu.check_balance'),
+        this.constantsService.get<string>('callbacks.check_balance') ??
+          'check_balance',
+      )
+      .row();
+
+    let finalText = text;
+    if (session.articleId) {
+      const competitors = await this.articlesService.getCompetitors(
+        session.articleId,
+      );
+      if (competitors.length > 0) {
+        finalText +=
+          this.localesService.t('article.competitors_disclaimer', {
+            competitors: competitors.join(', '),
+          }) ||
+          `\n\n!!!ВНИМАНИЕ!!! В статье присутствует упоминание конкурентов. Учтите это при работе со статьей. Конкуренты, найденные в тексте: ${competitors.join(', ')}`;
+      }
+    }
+
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      try {
+        await ctx.editMessageText(finalText, { reply_markup: keyboard });
+      } catch (e) {
+        this.logger.warn(`Failed to edit message: ${e}`);
+        await ctx.reply(finalText, { reply_markup: keyboard });
+      }
+    } else {
+      await ctx.reply(finalText, { reply_markup: keyboard });
+    }
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.answerCallbackQuery();
+      } catch (error) {
+        this.logger.warn(`Failed to answer callback query: ${error}`);
+      }
+    }
+  }
+
+  private async handleCreateArticle(ctx: Context) {
+    this.logger.log('Handling create article');
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) {
+      this.logger.warn('No telegramId in create article context');
+      return;
+    }
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) {
+      this.logger.warn(`User not found for telegramId: ${telegramId}`);
+      return;
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_TOPIC');
+    const message =
+      this.localesService.t('article.enter_topic') || 'Введите тему статьи:';
+    this.logger.log(`Replying with: ${message}`);
+    await ctx.reply(message);
+    if (ctx.callbackQuery) {
+      await ctx.answerCallbackQuery();
+    }
+  }
+
+  private async handleMessage(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId || !ctx.message?.text) return;
+
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    const text = ctx.message.text.trim();
+    if (this.isCancelCommand(text)) {
+      await this.handleCancel(ctx);
+      return;
+    }
+
+    if (this.isFileUploadState(state)) {
+      await ctx.reply(this.getFileUploadPrompt(state));
+      return;
+    }
+
+    if (
+      state === 'WAITING_FOR_QUESTIONS_FILE' ||
+      state === 'WAITING_FOR_FACT_CHECK_FILE' ||
+      state === 'WAITING_FOR_SEO_TZ_FILE'
+    ) {
+      const message =
+        state === 'WAITING_FOR_QUESTIONS_FILE'
+          ? this.localesService.t('article.upload_questions') ||
+            'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+          : state === 'WAITING_FOR_FACT_CHECK_FILE'
+            ? this.localesService.t('article.upload_fact_check') ||
+              'Пришлите факт-чек в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.'
+            : this.localesService.t('article.seo_tz_request') ||
+              'Для сео-оптимизации пришлите ТЗ в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.';
+      await ctx.reply(message);
+      return;
+    }
+    if (state === 'WAITING_FOR_TOPIC') {
+      const title = ctx.message.text;
+      await this.setUserContext(user.id, { title });
+      await this.setUserState(user.id, 'WAITING_FOR_TOPIC_CONFIRMATION');
+
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.confirm'),
+          this.constantsService.get<string>('callbacks.confirm_title') ??
+            'confirm_title',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.regenerate'),
+          this.constantsService.get<string>('callbacks.reenter_title') ??
+            'reenter_title',
+        );
+
+      await ctx.reply(
+        this.localesService.t('article.confirm_title', { title }),
+        { reply_markup: keyboard },
+      );
+      return;
+    }
+
+    if (state === 'WAITING_FOR_UPLOAD_TOPIC') {
+      const text = ctx.message.text;
+      if (text === '/same') {
+        await this.setUserContext(user.id, { sameTitle: true });
+      } else {
+        await this.setUserContext(user.id, { title: text });
+      }
+      await this.setUserState(user.id, 'WAITING_FOR_ARTICLE_FILE');
+
+      await ctx.reply(
+        this.localesService.t('article.upload_article_request') ??
+          'Пришлите статью в виде файла в формате docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
+
+    if (state === 'WAITING_FOR_BITRIX_ID') {
+      const bitrixIdStr = ctx.message.text;
+      const bitrixId = parseInt(bitrixIdStr, 10);
+
+      if (isNaN(bitrixId)) {
+        await ctx.reply(this.localesService.t('article.bitrix_id_invalid'));
+        return;
+      }
+
+      await this.usersService.updateBitrixId(user.id, bitrixId);
+      await this.deleteUserState(user.id);
+      await ctx.reply(this.localesService.t('article.bitrix_id_saved'));
+      await this.handleStart(ctx);
+      return;
+    }
+
+    if (state === 'WAITING_FOR_USER_PROMPT') {
+      const userPrompt = ctx.message.text;
+      const context = await this.getUserContext(user.id);
+      if (!context || !context.articleId) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+
+      const isMockMode =
+        this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+      const article = await this.articlesService.findById(context.articleId);
+      if (!article && !isMockMode) return;
+
+      const articleAddition = article?.additions.find(
+        (a) => a.type === ArticleAdditionType.ARTICLE,
+      );
+      if (!articleAddition && !isMockMode) {
+        await ctx.reply(this.localesService.t('errors.article_not_found'));
+        return;
+      }
+
+      await ctx.reply(
+        this.localesService.t('article.user_prompt_generating') ??
+          'Генерация статьи по заданному промпту началась...',
+      );
+
+      try {
+        if (article) {
+          await this.articlesService.addAddition(
+            article.id,
+            ArticleAdditionType.USER_PROMPT,
+            userPrompt,
+          );
+        }
+
+        const result = await this.bothubService.processUserPrompt(
+          articleAddition?.content || 'Mock Content',
+          userPrompt,
+          this.getUserLogContext(ctx),
+        );
+
+        await this.sendGenerationResult(ctx, result, 'user_prompt_article');
+
+        await this.setUserContext(user.id, {
+          ...context,
+          articleContent: articleAddition?.content,
+          rewrittenArticleContent: result.content,
+        });
+        await this.setUserState(
+          user.id,
+          'WAITING_FOR_USER_PROMPT_CONFIRMATION',
+        );
+
+        const keyboard = new InlineKeyboard()
+          .text(
+            this.localesService.t('menu.accept') ?? 'Принять статью',
+            this.constantsService.get<string>(
+              'callbacks.confirm_user_prompt',
+            ) ?? 'confirm_user_prompt',
+          )
+          .row()
+          .text(
+            this.localesService.t('menu.cancel') ?? 'Отмена',
+            this.constantsService.get<string>('callbacks.cancel_user_prompt') ??
+              'cancel_user_prompt',
+          );
+
+        await ctx.reply(
+          (
+            this.localesService.t('article.user_prompt_ready') ??
+            'Ознакомьтесь со статьей выше, если согласны с ней, то нажмите "Принять статью", если нет, то "Отмена".\nПотрачено на генерацию: {{usage}}'
+          ).replace('{{usage}}', (result.usage ?? 0).toString()),
+          { reply_markup: keyboard },
+        );
+      } catch (error) {
+        await this.logGenerationError(ctx, 'user_prompt_generation', error);
+        this.logger.error(error);
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+      }
+      return;
+    }
+  }
+
+  private async handleCancel(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (this.isCancelableState(state)) {
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+
+      if (state === 'WAITING_FOR_BITRIX_ID') {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в начальное меню.',
+        );
+        await this.handleStart(ctx);
+      } else {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в меню работы со статьей.',
+        );
+        await this.handleWorkWithArticle(ctx);
+      }
+
+      if (ctx.callbackQuery) {
+        await ctx.answerCallbackQuery();
+      }
+      return;
+    }
+
+    if (
+      state === 'WAITING_FOR_TOPIC' ||
+      state === 'WAITING_FOR_UPLOAD_TOPIC' ||
+      state === 'WAITING_FOR_QUESTIONS_FILE' ||
+      state === 'WAITING_FOR_FACT_CHECK_FILE' ||
+      state === 'WAITING_FOR_SEO_TZ_FILE' ||
+      state === 'WAITING_FOR_ARTICLE_FILE' ||
+      state === 'WAITING_FOR_USER_PROMPT' ||
+      state === 'WAITING_FOR_BITRIX_ID'
+    ) {
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+
+      if (state === 'WAITING_FOR_BITRIX_ID') {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в начальное меню.',
+        );
+        await this.handleStart(ctx);
+      } else {
+        await ctx.reply(
+          this.localesService.t('article.input_cancelled') ||
+            'Ввод отменен. Возвращаю в меню работы со статьей.',
+        );
+        await this.handleWorkWithArticle(ctx);
+      }
+
+      if (ctx.callbackQuery) {
+        await ctx.answerCallbackQuery();
+      }
+      return;
+    }
+
+    if (ctx.callbackQuery) {
+      await ctx.answerCallbackQuery();
+    }
+  }
+
+  private async handleConfirmTitle(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_TOPIC_CONFIRMATION') {
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.title) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const title = context.title;
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_questions') ||
+        'Генерирую вопросы, подождите...',
+    );
+
+    // Create article in DB
+    const article = await this.articlesService.create(user.id, title);
+    await this.setUserContext(user.id, { ...context, articleId: article.id });
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (session) {
+      await this.sessionsService.updateArticle(session.id, article.id);
+    }
+
+    try {
+      const questionsResult = await this.bothubService.generateQuestions(
+        title,
+        this.getUserLogContext(ctx),
+      );
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_questions',
+        questionsResult,
+        article.id,
+      );
+      await this.sendGenerationResult(ctx, questionsResult, 'questions');
+
+      // Save context for regeneration/confirmation
+      await this.setUserContext(user.id, {
+        ...context,
+        articleId: article.id,
+        questions: questionsResult.content,
+      });
+      await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_CONFIRMATION');
+
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.confirm'),
+          this.constantsService.get<string>('callbacks.confirm_questions') ??
+            'confirm_questions',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.edit_questions'),
+          this.constantsService.get<string>('callbacks.edit_questions') ??
+            'edit_questions',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.restart'),
+          this.constantsService.get<string>('callbacks.restart_process') ??
+            'restart_process',
+        );
+
+      await ctx.reply(
+        this.localesService.t('article.questions_generated', {
+          usage: (questionsResult.usage ?? 'неизвестно').toString(),
+        }) || 'Вопросы сгенерированы. Подтвердите или сгенерируйте заново.',
+        { reply_markup: keyboard },
+      );
+    } catch (error) {
+      await this.logGenerationError(ctx, 'generate_questions', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async sendGenerationResult(
+    ctx: Context,
+    result: GenerationResult,
+    baseFileName: string,
+  ) {
+    if (result.mockSystemPrompt || result.mockUserPrompt) {
+      if (result.mockSystemPrompt) {
+        const buffer = await DocxUtil.createDocx(result.mockSystemPrompt);
+        await ctx.replyWithDocument(
+          new InputFile(buffer, `${baseFileName}_system.docx`),
+        );
+      }
+      if (result.mockUserPrompt) {
+        const buffer = await DocxUtil.createDocx(result.mockUserPrompt);
+        await ctx.replyWithDocument(
+          new InputFile(buffer, `${baseFileName}_user.docx`),
+        );
+      }
+    } else {
+      const buffer = await DocxUtil.createDocx(result.content);
+      await ctx.replyWithDocument(
+        new InputFile(buffer, `${baseFileName}.docx`),
+      );
+    }
+  }
+
+  private async handleConfirmQuestions(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CONFIRMATION') {
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.questions ||
+      !context.title
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const articleId = context.articleId;
+    const questions = context.questions;
+    const title = context.title;
+
+    await ctx.answerCallbackQuery();
+
+    await this.generateArticleFromQuestions(ctx, {
+      userId: user.id,
+      articleId,
+      title,
+      questions,
+      context,
+    });
+  }
+
+  private async handleEditQuestions(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CONFIRMATION') {
+      await ctx.answerCallbackQuery(
+        this.localesService.t('article.stale_context') ||
+          'Контекст устарел. Возвращаю в меню статьи.',
+      );
+      await ctx.reply(
+        this.localesService.t('article.stale_context') ||
+          'Контекст устарел. Возвращаю в меню статьи.',
+      );
+      await this.handleWorkWithArticle(ctx);
+      return;
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_FILE');
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.upload_questions') ||
+        'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
+  }
+
+  private async generateArticleFromQuestions(
+    ctx: Context,
+    payload: {
+      userId: string;
+      articleId: string;
+      title: string;
+      questions: string;
+      context: UserContext;
+    },
+  ) {
+    const { userId, articleId, title, questions, context } = payload;
+
+    await this.articlesService.addAddition(
+      articleId,
+      ArticleAdditionType.QUESTION,
+      questions,
+    );
+
+    await ctx.reply(
+      this.localesService.t('article.generating_article') ||
+        'Генерирую статью, подождите...',
+    );
+
+    try {
+      const articleResult = await this.bothubService.generateArticle(
+        title,
+        questions,
+        this.getUserLogContext(ctx),
+      );
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_article',
+        articleResult,
+        articleId,
+      );
+      await this.sendGenerationResult(ctx, articleResult, 'article');
+
+      await this.setUserContext(userId, {
+        ...context,
+        articleContent: articleResult.content,
+      });
+      await this.setUserState(userId, 'WAITING_FOR_ARTICLE_CONFIRMATION');
+
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.confirm'),
+          this.constantsService.get<string>('callbacks.confirm_article') ??
+            'confirm_article',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.restart'),
+          this.constantsService.get<string>('callbacks.restart_process') ??
+            'restart_process',
+        );
+
+      await ctx.reply(
+        this.localesService.t('article.article_generated', {
+          usage: (articleResult.usage ?? 'неизвестно').toString(),
+        }) || 'Статья сгенерирована.',
+        { reply_markup: keyboard },
+      );
+    } catch (error) {
+      await this.logGenerationError(ctx, 'generate_article', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleConfirmArticle(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_ARTICLE_CONFIRMATION') {
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.articleId || !context.articleContent) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const articleId = context.articleId;
+    const articleContent = context.articleContent;
+
+    await ctx.answerCallbackQuery();
+
+    // Save article to DB
+    await this.articlesService.addAddition(
+      articleId,
+      ArticleAdditionType.ARTICLE,
+      articleContent,
+    );
+
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(this.localesService.t('article.article_confirmed'));
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleFactCheckGeneration(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) return;
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_fact_check') ||
+        'Генерирую факт-чек, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.generateFactCheck(
+        article?.title || 'Unknown Title',
+        articleAddition?.content || 'Mock Content',
+        this.getUserLogContext(ctx),
+      );
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_fact_check',
+        result,
+        article?.id,
+      );
+      await this.sendGenerationResult(ctx, result, 'fact_check');
+
+      await ctx.reply(
+        this.localesService.t('article.fact_check_generated', {
+          usage: (result.usage ?? 'неизвестно').toString(),
+        }) || 'Факт-чек сгенерирован.',
+      );
+
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.FACT_CHECK,
+          result.content,
+        );
+      }
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'generate_fact_check', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleEditFactCheck(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_FACT_CHECK_CONFIRMATION') {
+      return;
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_FACT_CHECK_FILE');
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.upload_fact_check') ||
+        'Пришлите факт-чек в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
+  }
+
+  private async handleFactCheckRewrite(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) return;
+
+    // Check if fact check exists
+    const factCheckAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.FACT_CHECK,
+    );
+    if (!factCheckAddition && !isMockMode) {
+      await ctx.reply(
+        this.localesService.t('errors.fact_check_not_found') ||
+          'Сначала сгенерируйте факт-чек.',
+      );
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.rewriting_article') ||
+        'Переписываю статью, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.rewriteArticle(
+        article?.title || 'Mock Title',
+        articleAddition?.content || 'Mock Content',
+        factCheckAddition?.content || 'Mock Fact Check',
+        this.getUserLogContext(ctx),
+      );
+
+      if (article) {
+        // Save old version
+        await this.articlesService.createVersion(
+          article.id,
+          articleAddition?.content || '',
+          'fact_check_rewrite',
+        );
+
+        // Update article content
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.ARTICLE,
+          result.content,
+        );
+      }
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'rewrite_article',
+        result,
+        article?.id,
+      );
+      await this.sendGenerationResult(ctx, result, 'rewritten_article');
+
+      await ctx.reply(
+        this.localesService.t('article.article_rewritten', {
+          usage: (result.usage ?? 'неизвестно').toString(),
+        }) || 'Статья переписана.',
+      );
+
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'rewrite_article', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleConfirmFactCheck(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_FACT_CHECK_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.articleId || !context.factCheckContent) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const articleId = context.articleId;
+    const factCheckContent = context.factCheckContent;
+
+    await ctx.answerCallbackQuery();
+
+    await this.saveFactCheckFromText(ctx, user.id, articleId, factCheckContent);
+  }
+
+  private async saveFactCheckFromText(
+    ctx: Context,
+    userId: string,
+    articleId: string,
+    factCheckContent: string,
+  ) {
+    await this.articlesService.addAddition(
+      articleId,
+      ArticleAdditionType.FACT_CHECK,
+      factCheckContent,
+    );
+
+    await this.deleteUserState(userId);
+    await this.deleteUserContext(userId);
+
+    await ctx.reply(
+      this.localesService.t('article.fact_check_confirmed') ||
+        'Факт-чек сохранен.',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleDocument(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+    const document = ctx.message?.document;
+    if (!document) return;
+
+    const state = await this.getUserState(user.id);
+    const caption = ctx.message?.caption?.trim();
+    if (this.isCancelCommand(caption)) {
+      await this.handleCancel(ctx);
+      return;
+    }
+
+    if (state === 'WAITING_FOR_UPLOAD_TOPIC') {
+      await ctx.reply(
+        this.localesService.t('article.enter_uploaded_article_topic') ||
+          'Введите тему статьи текстом или используйте /same.',
+      );
+      return;
+    }
+
+    if (!this.isFileUploadState(state)) {
+      return;
+    }
+
+    if (
+      state !== 'WAITING_FOR_QUESTIONS_FILE' &&
+      state !== 'WAITING_FOR_FACT_CHECK_FILE' &&
+      state !== 'WAITING_FOR_SEO_TZ_FILE' &&
+      state !== 'WAITING_FOR_ARTICLE_FILE' &&
+      state !== 'WAITING_FOR_UPLOAD_TOPIC'
+    ) {
+      return;
+    }
+
+    if (!this.isDocxDocument(document)) {
+      await ctx.reply(
+        this.localesService.t('errors.invalid_docx_format') ||
+          'Нужен файл в формате docx. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
+
+    const buffer = await this.downloadDocumentBuffer(document.file_id);
+    if (!buffer) {
+      await ctx.reply(
+        this.localesService.t('errors.docx_read_failed') ||
+          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
+
+    const text = await DocxUtil.extractText(buffer);
+    if (!text) {
+      await ctx.reply(
+        this.localesService.t('errors.docx_empty') ||
+          'Файл пустой. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
+
+    if (state === 'WAITING_FOR_ARTICLE_FILE') {
+      const session = await this.sessionsService.findActive(user.id);
+      if (!session) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+
+      let articleId = session.articleId;
+      const context = await this.getUserContext(user.id);
+
+      if (!articleId) {
+        // Create new article if not exists
+        const title =
+          context?.title || document.file_name || 'Uploaded Article';
+        const article = await this.articlesService.create(user.id, title);
+        articleId = article.id;
+        await this.sessionsService.updateArticle(session.id, articleId);
+
+        await this.articlesService.addAddition(
+          articleId,
+          ArticleAdditionType.ARTICLE,
+          text,
+        );
+      } else {
+        const article = await this.articlesService.findById(articleId);
+
+        // Update title if provided
+        if (context?.title && !context?.sameTitle) {
+          await this.articlesService.updateTitle(articleId, context.title);
+        }
+
+        const articleAddition = article?.additions.find(
+          (a) => a.type === ArticleAdditionType.ARTICLE,
+        );
+
+        if (articleAddition) {
+          // Save old version
+          await this.articlesService.createVersion(
+            articleId,
+            articleAddition.content,
+            'upload_article',
+          );
+          // Update current content
+          await this.articlesService.updateAddition(
+            articleId,
+            ArticleAdditionType.ARTICLE,
+            text,
+          );
+        } else {
+          // Add first article addition
+          await this.articlesService.addAddition(
+            articleId,
+            ArticleAdditionType.ARTICLE,
+            text,
+          );
+        }
+      }
+
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+      await ctx.reply(
+        this.localesService.t('article.upload_article_success') ??
+          'Статья успешно загружена и сохранена.',
+      );
+      await this.handleWorkWithArticle(ctx);
+      return;
+    }
+
+    if (state === 'WAITING_FOR_QUESTIONS_FILE') {
+      const context = await this.getUserContext(user.id);
+      if (!context || !context.articleId || !context.title) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+      await this.generateArticleFromQuestions(ctx, {
+        userId: user.id,
+        articleId: context.articleId,
+        title: context.title,
+        questions: text,
+        context: { ...context, questions: text },
+      });
+      return;
+    }
+
+    if (state === 'WAITING_FOR_FACT_CHECK_FILE') {
+      const context = await this.getUserContext(user.id);
+      if (!context || !context.articleId) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+      await this.saveFactCheckFromText(ctx, user.id, context.articleId, text);
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.articleId) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    await this.articlesService.updateAddition(
+      context.articleId,
+      ArticleAdditionType.SEO_TZ,
+      text,
+    );
+
+    await ctx.reply(
+      this.localesService.t('article.seo_tz_received') ||
+        'ТЗ получил. Начинаю генерацию текста...',
+    );
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(context.articleId);
+    if (!article && !isMockMode) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.reply(
+        this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью.',
+      );
+      return;
+    }
+
+    try {
+      const result = await this.bothubService.seoRewriteArticle(
+        articleAddition?.content || 'Mock Article Content',
+        text,
+        this.getUserLogContext(ctx),
+      );
+
+      if (article && articleAddition) {
+        await this.articlesService.createVersion(
+          context.articleId,
+          articleAddition.content,
+          'seo_rewrite',
+        );
+        await this.articlesService.updateAddition(
+          context.articleId,
+          ArticleAdditionType.ARTICLE,
+          result.content,
+        );
+      }
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'seo_rewrite_article',
+        result,
+        context.articleId,
+      );
+      await this.sendGenerationResult(ctx, result, 'seo_article');
+
+      await ctx.reply(
+        (
+          this.localesService.t('article.seo_article_generated', {
+            usage: (result.usage ?? 'неизвестно').toString(),
+          }) ||
+          'SEO-оптимизированная статья готова.\nПотрачено токенов: {{usage}}'
+        ).replace('{{usage}}', (result.usage ?? 'неизвестно').toString()),
+      );
+
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'seo_rewrite_article', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private isDocxDocument(document: {
+    file_name?: string;
+    mime_type?: string;
+  }): boolean {
+    const fileName = document.file_name?.toLowerCase() ?? '';
+    const mimeType = document.mime_type?.toLowerCase() ?? '';
+    return (
+      fileName.endsWith('.docx') ||
+      mimeType ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+  }
+
+  private async downloadDocumentBuffer(fileId: string): Promise<Buffer | null> {
+    if (!this.botToken) return null;
+    const file = await this.bot.api.getFile(fileId);
+    if (!file.file_path) return null;
+    const url = buildTelegramFileUrl(
+      this.telegramApiBaseUrl,
+      this.botToken,
+      file.file_path,
+    );
+    const response = await axios.get<ArrayBuffer>(url, {
+      responseType: 'arraybuffer',
+      ...(this.telegramProxyAgent
+        ? {
+            httpAgent: this.telegramProxyAgent,
+            httpsAgent: this.telegramProxyAgent,
+            proxy: false,
+          }
+        : {}),
+    });
+    return Buffer.from(response.data);
+  }
+
+  private startPolling() {
+    if (this.pollingStarted) {
+      return;
+    }
+
+    this.pollingStarted = true;
+    void (async () => {
+      try {
+        await this.bot.api.deleteWebhook({ drop_pending_updates: false });
+        this.logger.log('Telegram webhook removed, starting long polling');
+
+        await this.bot.start({
+          allowed_updates: ['message', 'callback_query'],
+          onStart: (botInfo) => {
+            this.logger.log(`Telegram bot started as ${botInfo.username}`);
+          },
+        });
+      } catch (error) {
+        this.pollingStarted = false;
+        this.logger.error(`Failed to start Telegram bot: ${error}`);
+      }
+    })();
+  }
+
+  private async handleConfirmRewrite(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_REWRITE_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.rewrittenArticleContent ||
+      !context.articleContent
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const articleId = context.articleId;
+    const rewrittenArticleContent = context.rewrittenArticleContent;
+    const articleContent = context.articleContent;
+
+    await ctx.answerCallbackQuery();
+
+    // Move old content to versions
+    await this.articlesService.createVersion(
+      articleId,
+      articleContent,
+      'rewrite_confirmation',
+    );
+
+    // Update current content
+    await this.articlesService.updateAddition(
+      articleId,
+      ArticleAdditionType.ARTICLE,
+      rewrittenArticleContent,
+    );
+
+    await ctx.reply(this.localesService.t('article.article_rewritten'));
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleArticleUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_uniqueness') ||
+        'Уникализирую статью, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.makeArticleUnique(
+        articleAddition?.content || 'Mock Content for Uniqueness',
+        this.getUserLogContext(ctx),
+      );
+
+      await this.sendGenerationResult(ctx, result, 'unique_article');
+
+      await this.setUserContext(user.id, {
+        articleId: article?.id,
+        articleContent: articleAddition?.content,
+        rewrittenArticleContent: result.content,
+      });
+      await this.setUserState(user.id, 'WAITING_FOR_UNIQUENESS_CONFIRMATION');
+
+      const keyboard = new InlineKeyboard()
+        .text(
+          this.localesService.t('menu.accept') ?? 'Принять статью',
+          this.constantsService.get<string>(
+            'callbacks.confirm_article_uniqueness',
+          ) ?? 'confirm_article_uniqueness',
+        )
+        .row()
+        .text(
+          this.localesService.t('menu.cancel') ?? 'Отмена',
+          this.constantsService.get<string>(
+            'callbacks.cancel_article_uniqueness',
+          ) ?? 'cancel_article_uniqueness',
+        );
+
+      await ctx.reply(
+        (
+          this.localesService.t('article.uniqueness_ready') ??
+          'Ознакомьтесь со статьей выше, если согласны с ней, то нажмите "Принять статью", если нет, то "Отмена".\nПотрачено на генерацию: {{usage}}'
+        ).replace('{{usage}}', (result.usage ?? 0).toString()),
+        { reply_markup: keyboard },
+      );
+    } catch (error) {
+      await this.logGenerationError(ctx, 'article_uniqueness', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleConfirmArticleUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_UNIQUENESS_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.rewrittenArticleContent ||
+      !context.articleContent
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    // Move old content to versions
+    await this.articlesService.createVersion(
+      context.articleId,
+      context.articleContent,
+      'article_uniqueness_rewrite',
+    );
+
+    // Update current content
+    await this.articlesService.updateAddition(
+      context.articleId,
+      ArticleAdditionType.ARTICLE,
+      context.rewrittenArticleContent,
+    );
+
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.uniqueness_accepted') ??
+        'Статья обновлена и сохранена.',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleCancelArticleUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    await ctx.answerCallbackQuery();
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.uniqueness_cancelled') ??
+        'Уникализация статьи отменена',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleUploadArticle(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session) {
+      // Create session if not exists
+      await this.sessionsService.create(user.id);
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_UPLOAD_TOPIC');
+    await ctx.answerCallbackQuery();
+
+    const message = session?.articleId
+      ? (this.localesService.t(
+          'article.upload_article_topic_request_with_same',
+        ) ??
+        'Введите тему для загружаемой статьи, либо введите /same, если хотите оставить текущую тему:\n/cancel — отменить и вернуться в меню работы со статьей.')
+      : (this.localesService.t('article.upload_article_topic_request') ??
+        'Введите тему для загружаемой статьи:\n/cancel — отменить и вернуться в меню работы со статьей.');
+
+    await ctx.reply(message);
+  }
+
+  private async handleSeoOptimization(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const factCheckAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.FACT_CHECK,
+    );
+    if (!factCheckAddition && !isMockMode) {
+      await ctx.reply(
+        this.localesService.t('errors.fact_check_not_found') ||
+          'Сначала сгенерируйте факт-чек.',
+      );
+      return;
+    }
+
+    await this.setUserContext(user.id, { articleId: article?.id });
+    await this.setUserState(user.id, 'WAITING_FOR_SEO_TZ_FILE');
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.seo_tz_request') ||
+        'Для сео-оптимизации пришлите ТЗ в формате docx.',
+    );
+  }
+
+  private async handleCheckUniqueness(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const activeCheck = article
+      ? await this.technicalArticleAdditionsService.findActiveByArticleId(
+          article.id,
+        )
+      : null;
+    if (activeCheck) {
+      await ctx.answerCallbackQuery();
+      await ctx.reply(
+        this.localesService.t('article.uniqueness_check_in_progress') ||
+          'Текущая проверка в процессе, пожалуйста, подождите.',
+      );
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    try {
+      const textUid = await this.textRuService.createCheck(
+        articleAddition?.content || 'Mock Content for Uniqueness',
+        this.getUserLogContext(ctx),
+      );
+      if (article) {
+        await this.technicalArticleAdditionsService.create(
+          article.id,
+          TechnicalArticleAdditionState.NEW,
+          JSON.stringify({ textUid }),
+        );
+
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.ARTICLE_UNIQ_CHECK,
+          this.localesService.t('article_menu.uniqueness_in_progress') ||
+            'Проверка в процессе',
+        );
+      }
+
+      await ctx.reply(
+        this.localesService.t('article.uniqueness_check_created') ||
+          'Задание на проверку уникальности создано. Как будет завершено, я сообщу.',
+      );
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'text_ru_create_check', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await this.setUserState(user.id, 'WAITING_FOR_USER_PROMPT');
+    await this.setUserContext(user.id, { articleId: article?.id });
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.enter_user_prompt') ??
+        'Введите ваш промпт для дополнения статьи:',
+    );
+  }
+
+  private async handleConfirmUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_USER_PROMPT_CONFIRMATION') return;
+
+    const context = await this.getUserContext(user.id);
+    if (
+      !context ||
+      !context.articleId ||
+      !context.rewrittenArticleContent ||
+      !context.articleContent
+    ) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    // Move old content to versions
+    await this.articlesService.createVersion(
+      context.articleId,
+      context.articleContent,
+      'uniq_prompt_rewrite',
+    );
+
+    // Update current content
+    await this.articlesService.updateAddition(
+      context.articleId,
+      ArticleAdditionType.ARTICLE,
+      context.rewrittenArticleContent,
+    );
+
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.user_prompt_accepted') ??
+        'Статья успешно дополнена и сохранена.',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleCancelUserPrompt(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    await ctx.answerCallbackQuery();
+    await this.deleteUserState(user.id);
+    await this.deleteUserContext(user.id);
+
+    await ctx.reply(
+      this.localesService.t('article.user_prompt_cancelled') ??
+        'Дополнение статьи отменено',
+    );
+
+    await this.handleWorkWithArticle(ctx);
+  }
+
+  private async handleRubrics(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_rubrics') ||
+        'Подбираю рубрики, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.generateRubrics(
+        article?.title || 'Unknown Title',
+        articleAddition?.content || 'Mock Content for Rubrics',
+        this.getUserLogContext(ctx),
+      );
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_rubrics',
+        result,
+        article?.id,
+      );
+      await this.sendGenerationResult(ctx, result, 'rubrics');
+
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.RUBRIC,
+          result.content,
+        );
+      }
+
+      await ctx.reply(
+        (
+          this.localesService.t('article.rubrics_generated', {
+            usage: (result.usage ?? 'неизвестно').toString(),
+          }) || 'Рубрики готовы (токенов: {{usage}}).'
+        ).replace('{{usage}}', (result.usage ?? 'неизвестно').toString()),
+      );
+
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'generate_rubrics', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+
+  private async handleProducts(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text:
+          this.localesService.t('errors.article_not_found') ||
+          'Сначала сгенерируйте статью',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_products') ||
+        'Подбираю продукты, подождите...',
+    );
+
+    try {
+      const result = await this.bothubService.generateProducts(
+        articleAddition?.content || 'Mock Content for Products',
+        this.getUserLogContext(ctx),
+      );
+
+      await this.logGenerationResultEvent(
+        ctx,
+        'generate_products',
+        result,
+        article?.id,
+      );
+      await this.sendGenerationResult(ctx, result, 'products');
+
+      if (article) {
+        await this.articlesService.addAddition(
+          article.id,
+          ArticleAdditionType.PRODUCT,
+          result.content,
+        );
+      }
+
+      await ctx.reply(
+        this.localesService.t('article.products_generated', {
+          usage: (result.usage ?? 'неизвестно').toString(),
+        }) || 'Продукты готовы.',
+      );
+
+      await this.handleWorkWithArticle(ctx);
+    } catch (error) {
+      await this.logGenerationError(ctx, 'generate_products', error);
+      this.logger.error(error);
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+    }
+  }
+  private async handleDownloadMenu(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const downloadPrefix =
+      this.constantsService.get<string>('callbacks.download_prefix') ??
+      'download:';
+    const returnToArticleMenuCallback =
+      this.constantsService.get<string>('callbacks.return_to_article_menu') ??
+      'return_to_article_menu';
+
+    const options = [
+      {
+        type: ArticleAdditionType.ARTICLE,
+        labelKey: 'download_menu.article',
+        fallback: 'Скачать текст статьи',
+      },
+      {
+        type: ArticleAdditionType.FACT_CHECK,
+        labelKey: 'download_menu.fact_check',
+        fallback: 'Скачать факт-чек',
+      },
+      {
+        type: ArticleAdditionType.RUBRIC,
+        labelKey: 'download_menu.rubrics',
+        fallback: 'Скачать рубрики',
+      },
+      {
+        type: ArticleAdditionType.PRODUCT,
+        labelKey: 'download_menu.products',
+        fallback: 'Скачать продукты',
+      },
+      {
+        type: ArticleAdditionType.QUESTION,
+        labelKey: 'download_menu.questions',
+        fallback: 'Скачать вопросы',
+      },
+    ];
+
+    const keyboard = new InlineKeyboard();
+    let hasFiles = false;
+
+    for (const option of options) {
+      const addition = article?.additions.find((a) => a.type === option.type);
+      if (!addition && !isMockMode) continue;
+      hasFiles = true;
+      keyboard.text(
+        this.localesService.t(option.labelKey) ?? option.fallback,
+        `${downloadPrefix}${option.type}`,
+      );
+      keyboard.row();
+    }
+
+    keyboard.text(
+      this.localesService.t('download_menu.return_to_menu') ??
+        'Вернуться к основному меню',
+      returnToArticleMenuCallback,
+    );
+
+    await ctx.answerCallbackQuery();
+    if (!hasFiles) {
+      await ctx.reply(
+        this.localesService.t('download_menu.no_files') ||
+          'Для этой статьи пока нет файлов.',
+        { reply_markup: keyboard },
+      );
+      return;
+    }
+
+    await ctx.reply(
+      this.localesService.t('download_menu.title') ||
+        'Доступные файлы для скачивания:',
+      { reply_markup: keyboard },
+    );
+  }
+
+  private async handleDownloadItem(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const article = await this.articlesService.findById(session.articleId);
+    if (!article && !isMockMode) return;
+
+    const callbackData = ctx.callbackQuery?.data ?? '';
+    const downloadPrefix =
+      this.constantsService.get<string>('callbacks.download_prefix') ??
+      'download:';
+    if (!callbackData.startsWith(downloadPrefix)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const type = callbackData.replace(downloadPrefix, '');
+    const allowedTypes = new Set<string>([
+      ArticleAdditionType.ARTICLE,
+      ArticleAdditionType.FACT_CHECK,
+      ArticleAdditionType.RUBRIC,
+      ArticleAdditionType.PRODUCT,
+      ArticleAdditionType.QUESTION,
+    ]);
+    if (!allowedTypes.has(type)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const addition = article?.additions.find(
+      (a) => a.type === (type as ArticleAdditionType),
+    );
+    if (!addition && !isMockMode) {
+      await ctx.reply(
+        this.localesService.t('download_menu.no_files') ||
+          'Для этой статьи пока нет файлов.',
+      );
+      return;
+    }
+
+    const fileNameMap: Record<string, string> = {
+      [ArticleAdditionType.ARTICLE]: 'article.docx',
+      [ArticleAdditionType.FACT_CHECK]: 'fact_check.docx',
+      [ArticleAdditionType.RUBRIC]: 'rubrics.docx',
+      [ArticleAdditionType.PRODUCT]: 'products.docx',
+      [ArticleAdditionType.QUESTION]: 'questions.docx',
+    };
+
+    const content = addition?.content || `Mock content for ${type}`;
+    const buffer = await DocxUtil.createDocx(content);
+    await ctx.replyWithDocument(
+      new InputFile(buffer, fileNameMap[type] ?? 'content.docx'),
+    );
+    await ctx.answerCallbackQuery();
+  }
+
+  private async handleAttachBitrixId(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    await this.setUserState(user.id, 'WAITING_FOR_BITRIX_ID');
+    await ctx.answerCallbackQuery();
+    await ctx.reply(this.localesService.t('article.bitrix_id_request'));
+  }
+
+  private async handleCreateBitrixTask(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const session = await this.sessionsService.findActive(user.id);
+    if (!session || !session.articleId || !session.scenarioId) return;
+
+    const isMockMode =
+      this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
+    const scenario = await this.scenariosService.findById(session.scenarioId);
+    const article = await this.articlesService.findById(session.articleId);
+    if ((!scenario || !article) && !isMockMode) return;
+
+    const articleAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE,
+    );
+    const uniqAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.ARTICLE_UNIQ_CHECK,
+    );
+    const rubricAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.RUBRIC,
+    );
+    const productAddition = article?.additions.find(
+      (a) => a.type === ArticleAdditionType.PRODUCT,
+    );
+
+    if (!articleAddition && !isMockMode) {
+      await ctx.answerCallbackQuery({
+        text: this.localesService.t('errors.article_not_found'),
+        show_alert: true,
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(this.localesService.t('article.bitrix_task_creating'));
+
+    const uniqueness = uniqAddition?.content ? uniqAddition.content : '0';
+    const articleTitle = article?.title || 'Mock Article Title';
+    const scenarioName = scenario?.name || 'Mock Scenario';
+    const title = `${scenarioName} статья на размещение ${articleTitle}`;
+    const description = `Разместить статью. Тема: ${articleTitle}. Уникальность: ${uniqueness}%. Вся необходимая информация находится во вложениях к задаче`;
+
+    try {
+      const taskId = await this.bitrixService.createTask({
+        title,
+        description,
+        createdBy: user.bitrixId || undefined,
+        userContext: this.getUserLogContext(ctx),
+      });
+
+      // Save task ID to DB
+      if (article) {
+        await this.articlesService.updateAddition(
+          article.id,
+          ArticleAdditionType.BITRIX_TASK,
+          taskId.toString(),
+        );
+      }
+
+      // Prepare files for Bitrix
+      const filesToUpload: Array<{ name: string; content: string }> = [];
+
+      // Article
+      if (articleAddition || isMockMode) {
+        const articleBuffer = await DocxUtil.createDocx(
+          articleAddition?.content || 'Mock Article Content',
+        );
+        filesToUpload.push({
+          name: 'article.docx',
+          content: articleBuffer.toString('base64'),
+        });
+      }
+
+      // Rubrics
+      if (rubricAddition || isMockMode) {
+        const rubricBuffer = await DocxUtil.createDocx(
+          rubricAddition?.content || 'Mock Rubrics Content',
+        );
+        filesToUpload.push({
+          name: 'rubrics.docx',
+          content: rubricBuffer.toString('base64'),
+        });
+      }
+
+      // Products
+      if (productAddition || isMockMode) {
+        const productBuffer = await DocxUtil.createDocx(
+          productAddition?.content || 'Mock Products Content',
+        );
+        filesToUpload.push({
+          name: 'products.docx',
+          content: productBuffer.toString('base64'),
+        });
+      }
+
+      // Upload files
+      await this.bitrixService.uploadTaskFiles(
+        taskId,
+        filesToUpload,
+        this.getUserLogContext(ctx),
+      );
+
+      const taskUrl = this.bitrixService.generateTaskUrl(taskId);
+      await ctx.reply(
+        this.localesService.t('article.bitrix_task_created', { taskUrl }),
+      );
+
+      // Finish cycle
+      await this.sessionsService.delete(session.id);
+      await this.deleteUserState(user.id);
+      await this.deleteUserContext(user.id);
+
+      await this.handleStart(ctx);
+    } catch (error) {
+      this.logger.error(`Error creating Bitrix task: ${error}`);
+      await ctx.reply(this.localesService.t('article.bitrix_task_error'));
+    }
+  }
+
+  private async processUniquenessChecks() {
+    const items = await this.technicalArticleAdditionsService.findActive();
+    const now = new Date().getTime();
+
+    for (const item of items) {
+      const createdAt = item.createdAt.getTime();
+      if (now - createdAt > 60 * 60 * 1000) {
+        await this.technicalArticleAdditionsService.update(item.id, {
+          state: TechnicalArticleAdditionState.ERROR,
+          message: 'Не удалось получить проверку',
+        });
+        await this.notifyUniquenessError(item.articleId);
+        continue;
+      }
+
+      if (
+        item.state === TechnicalArticleAdditionState.PENDING &&
+        now - item.updatedAt.getTime() < 45 * 1000
+      ) {
+        continue;
+      }
+
+      if (item.state === TechnicalArticleAdditionState.NEW) {
+        await this.technicalArticleAdditionsService.update(item.id, {
+          state: TechnicalArticleAdditionState.RUNNING,
+        });
+      }
+
+      const textUid = this.extractTextUid(item.technicalInfo);
+      if (!textUid) {
+        await this.technicalArticleAdditionsService.update(item.id, {
+          state: TechnicalArticleAdditionState.ERROR,
+          message: 'Не удалось получить идентификатор проверки',
+        });
+        await this.notifyUniquenessError(item.articleId);
+        continue;
+      }
+
+      const result = await this.textRuService.getResult(textUid);
+      if (result.status === 'pending') {
+        await this.technicalArticleAdditionsService.update(item.id, {
+          state: TechnicalArticleAdditionState.RUNNING,
+        });
+        continue;
+      }
+
+      if (result.status === 'error') {
+        const tries = item.tries + 1;
+        if (tries >= 3) {
+          await this.technicalArticleAdditionsService.update(item.id, {
+            state: TechnicalArticleAdditionState.ERROR,
+            tries,
+            message: result.message,
+          });
+          await this.notifyUniquenessError(item.articleId);
+        } else {
+          await this.technicalArticleAdditionsService.update(item.id, {
+            state: TechnicalArticleAdditionState.PENDING,
+            tries,
+            message: result.message,
+          });
+        }
+        continue;
+      }
+
+      const percent = result.unique.replace(',', '.');
+      await this.articlesService.updateAddition(
+        item.articleId,
+        ArticleAdditionType.ARTICLE_UNIQ_CHECK,
+        percent,
+      );
+      await this.technicalArticleAdditionsService.update(item.id, {
+        state: TechnicalArticleAdditionState.FINISHED,
+        message: null,
+      });
+      await this.notifyUniquenessFinished(item.articleId, percent);
+    }
+  }
+
+  private extractTextUid(technicalInfo?: string | null): string | null {
+    if (!technicalInfo) return null;
+    try {
+      const parsed = JSON.parse(technicalInfo) as { textUid?: string };
+      if (parsed?.textUid) return parsed.textUid;
+    } catch {
+      if (technicalInfo.trim().length > 0) {
+        return technicalInfo.trim();
+      }
+    }
+    return null;
+  }
+
+  private async notifyUniquenessFinished(articleId: string, percent: string) {
+    const article = await this.articlesService.findById(articleId);
+    if (!article) return;
+    const user = await this.usersService.findById(article.userId);
+    if (!user?.telegramId) return;
+    await this.bot.api.sendMessage(
+      Number(user.telegramId),
+      this.localesService.t('article.uniqueness_check_finished', { percent }) ||
+        `Результат проверки готов. Уникальность текста: ${percent}%`,
+    );
+  }
+
+  private async notifyUniquenessError(articleId: string) {
+    const article = await this.articlesService.findById(articleId);
+    if (!article) return;
+    const user = await this.usersService.findById(article.userId);
+    if (!user?.telegramId) return;
+    await this.bot.api.sendMessage(
+      Number(user.telegramId),
+      this.localesService.t('article.uniqueness_check_error') ||
+        'Возникла техническая ошибка в процессе проверки уникальности, обратитесь к администратору системы за подробностями.',
+    );
+  }
+
+  private async handleRegenerate(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+
+    if (state === 'WAITING_FOR_FACT_CHECK_CONFIRMATION') {
+      await this.handleFactCheckGeneration(ctx);
+    } else if (state === 'WAITING_FOR_REWRITE_CONFIRMATION') {
+      await this.handleFactCheckRewrite(ctx);
+    } else {
+      await ctx.answerCallbackQuery();
+    }
+  }
+}
+

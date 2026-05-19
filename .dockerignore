@@ -1,0 +1,11 @@
+node_modules
+cabinet/node_modules
+dist
+cabinet/dist
+coverage
+.git
+.env*
+logs
+cabinet/*.tsbuildinfo
+cabinet/vite.config.js
+cabinet/vite.config.d.ts

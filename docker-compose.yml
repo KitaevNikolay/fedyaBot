@@ -1,0 +1,85 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fedyabot-app:latest
+    container_name: fedyabot-app
+    restart: always
+    env_file:
+      - .env.prod
+    environment:
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    # For connecting to external DB/Nginx on host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "outline.rilokobotfactory3.ru:host-gateway"
+      - "fedyabot.rilokobotfactory3.ru:host-gateway"
+      - "api.telegram.org:149.154.167.220"
+    ports:
+      - "7000:3000"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  cabinet-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.cabinet-api
+    image: fedyabot-cabinet-api:latest
+    container_name: fedyabot-cabinet-api
+    restart: always
+    env_file:
+      - .env.prod
+    environment:
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+      CABINET_PORT: 3001
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "outline.rilokobotfactory3.ru:host-gateway"
+      - "fedyabot.rilokobotfactory3.ru:host-gateway"
+    ports:
+      - "7001:3001"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  cabinet-frontend:
+    build:
+      context: .
+      dockerfile: cabinet/Dockerfile
+      args:
+        VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-}
+    image: fedyabot-cabinet-frontend:latest
+    container_name: fedyabot-cabinet-frontend
+    restart: always
+    ports:
+      - "7002:80"
+    depends_on:
+      cabinet-api:
+        condition: service_started
+
+  redis:
+    image: redis:7.2.4-alpine
+    container_name: fedyabot-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
