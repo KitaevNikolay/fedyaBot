@@ -96,6 +96,7 @@ UI реализован внутри Telegram:
 | id | String (UUID) | Идентификатор статьи |
 | userId | String | Ссылка на пользователя |
 | title | String | Заголовок статьи |
+| authorName | String? | Выбранный авторский стиль (тон-оф-войс), пусто = без стиля |
 | createdAt | DateTime | Дата создания |
 | updatedAt | DateTime | Дата обновления |
 

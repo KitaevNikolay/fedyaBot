@@ -4,6 +4,7 @@
 
 Уникализация статьи пользовательские промт (article_uniqueness)
 {{ ARTICLE.content }}
+{{ author_name }}
 
 Переписать статью под SEO ТЗ системный (seo_rewrite_article) V2
 Нет
@@ -11,6 +12,7 @@
 Переписать статью под SEO ТЗ пользовательский (seo_rewrite_article)
 {{ SEO_TZ.content }}
 {{ ARTICLE.content }}
+{{ author_name }}
 
 Генерация рубрик/подрубрик. Системный промпт (generate_rubrics)
 {{ article_subject }}
@@ -40,8 +42,10 @@
 Переписать статью с фак-чеком (rewrite_article)
 {{ FACT_CHECK.content }}
 {{ ARTICLE.content }}
+{{ author_name }}
 
 Генерация статьи пользовательский промт (generate_article)
 {{ article_subject }}
 {{ QUESTION.content }}
 {{ today }}
+{{ author_name }}

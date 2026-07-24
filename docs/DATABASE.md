@@ -40,6 +40,7 @@
 | id | String (UUID) | Первичный ключ |
 | userId | String | ID пользователя |
 | title | String (Text) | Заголовок статьи |
+| authorName | String? | Выбранный авторский стиль (тон-оф-войс), пусто = без стиля |
 | createdAt | DateTime | Дата создания |
 | updatedAt | DateTime | Дата обновления |
 

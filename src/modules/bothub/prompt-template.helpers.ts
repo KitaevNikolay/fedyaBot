@@ -1,6 +1,7 @@
 export type PromptPlaceholderKey =
   | 'article_subject'
   | 'today'
+  | 'author_name'
   | 'QUESTION.content'
   | 'ARTICLE.content'
   | 'FACT_CHECK.content'
@@ -16,6 +17,7 @@ export type PromptPlaceholderDefinition = {
 const PLACEHOLDER_LABELS: Record<PromptPlaceholderKey, string> = {
   article_subject: 'Тема статьи',
   today: 'Текущая дата',
+  author_name: 'Стиль автора',
   'QUESTION.content': 'Сгенерированные вопросы',
   'ARTICLE.content': 'Текст статьи',
   'FACT_CHECK.content': 'Результат факт-чека',
@@ -45,6 +47,7 @@ export const PROMPT_PLACEHOLDERS_BY_TYPE: Record<
     createPlaceholder('article_subject'),
     createPlaceholder('QUESTION.content'),
     createPlaceholder('today'),
+    createPlaceholder('author_name'),
   ],
   generate_fact_check: [
     createPlaceholder('ARTICLE.content'),
@@ -54,17 +57,22 @@ export const PROMPT_PLACEHOLDERS_BY_TYPE: Record<
     createPlaceholder('article_subject'),
     createPlaceholder('ARTICLE.content'),
     createPlaceholder('FACT_CHECK.content'),
+    createPlaceholder('author_name'),
   ],
   seo_rewrite_article: [
     createPlaceholder('SEO_TZ.content'),
     createPlaceholder('ARTICLE.content'),
+    createPlaceholder('author_name'),
   ],
   generate_rubrics: [
     createPlaceholder('article_subject'),
     createPlaceholder('ARTICLE.content'),
   ],
   generate_products: [createPlaceholder('ARTICLE.content')],
-  article_uniqueness: [createPlaceholder('ARTICLE.content')],
+  article_uniqueness: [
+    createPlaceholder('ARTICLE.content'),
+    createPlaceholder('author_name'),
+  ],
   uniq_prompt: [
     createPlaceholder('ARTICLE.content'),
     createPlaceholder('USER_PROMPT.content'),

@@ -26,6 +26,12 @@ import { TechnicalArticleAdditionsService } from '../technical-article-additions
 import { TextRuService } from '../text-ru/text-ru.service';
 import { BitrixService } from '../bitrix/bitrix.service';
 import { UsersService } from '../users/users.service';
+import {
+  extractArticleBody,
+  extractArticleBodyWithMarkers,
+  findMissingImageMarkers,
+  restoreArticleMetadata,
+} from '../../common/utils/article-text.util';
 
 type UserContext = {
   title?: string;
@@ -36,6 +42,13 @@ type UserContext = {
   factCheckContent?: string;
   rewrittenArticleContent?: string;
   bitrixId?: string;
+  authorName?: string;
+};
+
+type AuthorOption = {
+  code: string;
+  name: string;
+  label: string;
 };
 
 function buildTelegramFileUrl(
@@ -52,6 +65,47 @@ function buildTelegramFileUrl(
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
+  // Авторы тон-оф-войс: name пишется в Article.authorName и подставляется
+  // в промпты через {{ author_name }}; code используется в callback-данных
+  private static readonly AUTHOR_OPTIONS: AuthorOption[] = [
+    {
+      code: 'memruk',
+      name: 'Евгения Мемрук',
+      label: 'Евгения Мемрук (отчётность, налоги — сдержанный тон)',
+    },
+    {
+      code: 'klimova',
+      name: 'Марина Климова',
+      label: 'Марина Климова (отчётность — сухой методологический тон)',
+    },
+    {
+      code: 'morozov',
+      name: 'Дмитрий Морозов',
+      label: 'Дмитрий Морозов (ЭДО/ЭПД — технический тон)',
+    },
+    {
+      code: 'kaverina',
+      name: 'Оксана Каверина',
+      label: 'Оксана Каверина (ЭДО, малый бизнес — практический тон)',
+    },
+    {
+      code: 'ivanov',
+      name: 'Алексей Иванов',
+      label: 'Алексей Иванов (финансы, объяснение сложного)',
+    },
+    {
+      code: 'samitov',
+      name: 'Марат Самитов',
+      label: 'Марат Самитов (бизнес, налоги, риски)',
+    },
+    {
+      code: 'samkova',
+      name: 'Надежда Самкова',
+      label: 'Надежда Самкова (законы, закупки, норма)',
+    },
+    { code: 'none', name: '', label: 'Без стиля автора' },
+  ];
+
   private static readonly FILE_UPLOAD_STATES = new Set([
     'WAITING_FOR_QUESTIONS_FILE',
     'WAITING_FOR_FACT_CHECK_FILE',
@@ -74,7 +128,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isFileUploadState(state?: string | null) {
-    return typeof state === 'string' && BotService.FILE_UPLOAD_STATES.has(state);
+    return (
+      typeof state === 'string' && BotService.FILE_UPLOAD_STATES.has(state)
+    );
   }
 
   private isCancelableState(state?: string | null) {
@@ -232,7 +288,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         }
       }
       this.wrapBotMethods(ctx, userContext);
-      
+
       try {
         await next();
       } catch (error) {
@@ -363,6 +419,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const downloadPrefix =
       this.constantsService.get<string>('callbacks.download_prefix') ??
       'download:';
+    const authorSelectPrefix =
+      this.constantsService.get<string>('callbacks.author_select_prefix') ??
+      'author_select:';
+    const generateQuestionsChoiceCallback =
+      this.constantsService.get<string>(
+        'callbacks.generate_questions_choice',
+      ) ?? 'generate_questions_choice';
+    const uploadQuestionsChoiceCallback =
+      this.constantsService.get<string>('callbacks.upload_questions_choice') ??
+      'upload_questions_choice';
     this.bot.callbackQuery(
       [selectScenarioCallback, chooseAnotherScenarioCallback, mainMenuCallback],
       async (ctx) => {
@@ -401,6 +467,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     this.bot.callbackQuery(confirmTitleCallback, async (ctx) => {
       await this.handleConfirmTitle(ctx);
+    });
+
+    this.bot.callbackQuery(generateQuestionsChoiceCallback, async (ctx) => {
+      await this.handleGenerateQuestionsChoice(ctx);
+    });
+
+    this.bot.callbackQuery(uploadQuestionsChoiceCallback, async (ctx) => {
+      await this.handleUploadQuestionsChoice(ctx);
     });
 
     this.bot.callbackQuery(reenterTitleCallback, async (ctx) => {
@@ -515,6 +589,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.handleScenarioSelected(ctx);
     });
 
+    this.bot.callbackQuery(
+      new RegExp(`^${authorSelectPrefix}`),
+      async (ctx) => {
+        await this.handleAuthorSelected(ctx);
+      },
+    );
+
     this.bot.on('message:text', async (ctx) => {
       await this.handleMessage(ctx);
     });
@@ -525,32 +606,37 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       // Don't await setMyCommands to prevent blocking app startup if Telegram API hangs
-      this.bot.api.setMyCommands([
-        {
-          command: startCommand,
-          description: this.localesService.t('commands.start'),
-        },
-        {
-          command: cancelCommand,
-          description: this.localesService.t('commands.cancel'),
-        },
-        {
-          command: menuCommand,
-          description: this.localesService.t('commands.menu'),
-        },
-      ]).catch(error => {
-        this.logger.warn(`Failed to set bot commands: ${error}`);
-      });
+      this.bot.api
+        .setMyCommands([
+          {
+            command: startCommand,
+            description: this.localesService.t('commands.start'),
+          },
+          {
+            command: cancelCommand,
+            description: this.localesService.t('commands.cancel'),
+          },
+          {
+            command: menuCommand,
+            description: this.localesService.t('commands.menu'),
+          },
+        ])
+        .catch((error) => {
+          this.logger.warn(`Failed to set bot commands: ${error}`);
+        });
     } catch (error) {
       this.logger.warn(`Failed to set bot commands synchronously: ${error}`);
     }
 
     if (webhookUrl) {
-      this.bot.api.setWebhook(webhookUrl).then(() => {
-        this.logger.log('Telegram webhook set');
-      }).catch(error => {
-        this.logger.warn(`Failed to set Telegram webhook: ${error}`);
-      });
+      this.bot.api
+        .setWebhook(webhookUrl)
+        .then(() => {
+          this.logger.log('Telegram webhook set');
+        })
+        .catch((error) => {
+          this.logger.warn(`Failed to set Telegram webhook: ${error}`);
+        });
     } else {
       this.startPolling();
     }
@@ -760,9 +846,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     const keyboard = new InlineKeyboard();
-    keyboard
-      .url('Админка', 'https://fedya-bot.rilokobotfactory.ru/')
-      .row();
+    keyboard.url('Админка', 'https://fedya-bot.rilokobotfactory.ru/').row();
 
     if (!session.scenarioId) {
       keyboard
@@ -1190,6 +1274,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (state === 'WAITING_FOR_QUESTIONS_CHOICE') {
+      await ctx.reply(
+        this.localesService.t('article.questions_method_choice') ||
+          'Новые вопросы или загрузим ТЗ/вопросы вручную?',
+        { reply_markup: this.buildQuestionsChoiceKeyboard() },
+      );
+      return;
+    }
+
     if (
       state === 'WAITING_FOR_QUESTIONS_FILE' ||
       state === 'WAITING_FOR_FACT_CHECK_FILE' ||
@@ -1435,10 +1528,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const title = context.title;
 
     await ctx.answerCallbackQuery();
-    await ctx.reply(
-      this.localesService.t('article.generating_questions') ||
-        'Генерирую вопросы, подождите...',
-    );
 
     // Create article in DB
     const article = await this.articlesService.create(user.id, title);
@@ -1448,6 +1537,57 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (session) {
       await this.sessionsService.updateArticle(session.id, article.id);
     }
+
+    await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_CHOICE');
+
+    await ctx.reply(
+      this.localesService.t('article.questions_method_choice') ||
+        'Новые вопросы или загрузим ТЗ/вопросы вручную?',
+      { reply_markup: this.buildQuestionsChoiceKeyboard() },
+    );
+  }
+
+  private buildQuestionsChoiceKeyboard() {
+    return new InlineKeyboard()
+      .text(
+        this.localesService.t('menu.generate_questions') ||
+          'Сгенерировать вопросы',
+        this.constantsService.get<string>(
+          'callbacks.generate_questions_choice',
+        ) ?? 'generate_questions_choice',
+      )
+      .row()
+      .text(
+        this.localesService.t('menu.upload_questions') || 'Загрузить свои',
+        this.constantsService.get<string>(
+          'callbacks.upload_questions_choice',
+        ) ?? 'upload_questions_choice',
+      );
+  }
+
+  private async handleGenerateQuestionsChoice(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CHOICE') {
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.title || !context.articleId) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const { title, articleId } = context;
+
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      this.localesService.t('article.generating_questions') ||
+        'Генерирую вопросы, подождите...',
+    );
 
     try {
       const questionsResult = await this.bothubService.generateQuestions(
@@ -1459,14 +1599,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         ctx,
         'generate_questions',
         questionsResult,
-        article.id,
+        articleId,
       );
       await this.sendGenerationResult(ctx, questionsResult, 'questions');
 
       // Save context for regeneration/confirmation
       await this.setUserContext(user.id, {
         ...context,
-        articleId: article.id,
         questions: questionsResult.content,
       });
       await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_CONFIRMATION');
@@ -1501,6 +1640,26 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(error);
       await ctx.reply(this.localesService.t('errors.generation_failed'));
     }
+  }
+
+  private async handleUploadQuestionsChoice(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (state !== 'WAITING_FOR_QUESTIONS_CHOICE') {
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_FILE');
+
+    await ctx.reply(
+      this.localesService.t('article.upload_questions') ||
+        'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
   }
 
   private async sendGenerationResult(
@@ -1550,19 +1709,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(this.localesService.t('errors.generation_failed'));
       return;
     }
-    const articleId = context.articleId;
-    const questions = context.questions;
-    const title = context.title;
-
     await ctx.answerCallbackQuery();
 
-    await this.generateArticleFromQuestions(ctx, {
-      userId: user.id,
-      articleId,
-      title,
-      questions,
-      context,
-    });
+    await this.promptAuthorSelection(user.id, ctx, context);
   }
 
   private async handleEditQuestions(ctx: Context) {
@@ -1581,6 +1730,133 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.reply(
       this.localesService.t('article.upload_questions') ||
         'Пришлите вопросы в виде файла. Формат файла - docx.\n/cancel — отменить и вернуться в меню работы со статьей.',
+    );
+  }
+
+  private getAuthorSelectPrefix() {
+    return (
+      this.constantsService.get<string>('callbacks.author_select_prefix') ??
+      'author_select:'
+    );
+  }
+
+  private buildAuthorSelectionKeyboard(currentAuthorName?: string | null) {
+    const prefix = this.getAuthorSelectPrefix();
+    const keyboard = new InlineKeyboard();
+
+    if (currentAuthorName) {
+      keyboard
+        .text(
+          this.localesService.t('article.keep_current_author', {
+            author: currentAuthorName,
+          }),
+          `${prefix}keep`,
+        )
+        .row();
+    }
+
+    for (const option of BotService.AUTHOR_OPTIONS) {
+      keyboard.text(option.label, `${prefix}${option.code}`).row();
+    }
+
+    return keyboard;
+  }
+
+  private async promptAuthorSelection(
+    userId: string,
+    ctx: Context,
+    context: UserContext,
+  ) {
+    await this.setUserContext(userId, context);
+    await this.setUserState(userId, 'WAITING_FOR_AUTHOR_SELECTION');
+
+    await ctx.reply(
+      this.localesService.t('article.choose_author') ||
+        'Выберите стиль автора для статьи:',
+      { reply_markup: this.buildAuthorSelectionKeyboard() },
+    );
+  }
+
+  private async handleAuthorSelected(ctx: Context) {
+    const telegramId = ctx.from?.id?.toString();
+    if (!telegramId) return;
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) return;
+
+    const state = await this.getUserState(user.id);
+    if (
+      state !== 'WAITING_FOR_AUTHOR_SELECTION' &&
+      state !== 'WAITING_FOR_SEO_AUTHOR_SELECTION'
+    ) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const prefix = this.getAuthorSelectPrefix();
+    const code = ctx.callbackQuery?.data?.slice(prefix.length) ?? '';
+    const option = BotService.AUTHOR_OPTIONS.find((item) => item.code === code);
+
+    if (!option && code !== 'keep') {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const context = await this.getUserContext(user.id);
+    if (!context || !context.articleId) {
+      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      return;
+    }
+    const articleId = context.articleId;
+
+    await ctx.answerCallbackQuery();
+
+    let authorName = '';
+    if (code === 'keep') {
+      const article = await this.articlesService.findById(articleId);
+      authorName = article?.authorName ?? '';
+    } else {
+      authorName = option?.name ?? '';
+      try {
+        await this.articlesService.updateAuthorName(
+          articleId,
+          authorName || null,
+        );
+      } catch (error) {
+        // В mock-режиме статьи может не быть в БД — сценарий не прерываем
+        this.logger.warn(`Failed to save article authorName: ${error}`);
+      }
+    }
+
+    await ctx.reply(
+      authorName
+        ? this.localesService.t('article.author_selected', {
+            author: authorName,
+          }) || `Стиль автора: ${authorName}`
+        : this.localesService.t('article.author_none_selected') ||
+            'Продолжаю без авторского стиля.',
+    );
+
+    if (state === 'WAITING_FOR_AUTHOR_SELECTION') {
+      if (!context.questions || !context.title) {
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        return;
+      }
+      await this.generateArticleFromQuestions(ctx, {
+        userId: user.id,
+        articleId,
+        title: context.title,
+        questions: context.questions,
+        context: { ...context, authorName },
+      });
+      return;
+    }
+
+    // SEO-сценарий: автор выбран, дальше запрашиваем ТЗ
+    await this.setUserContext(user.id, { ...context, authorName });
+    await this.setUserState(user.id, 'WAITING_FOR_SEO_TZ_FILE');
+    await ctx.reply(
+      this.localesService.t('article.seo_tz_request') ||
+        'Для сео-оптимизации пришлите ТЗ в формате docx.',
     );
   }
 
@@ -1611,6 +1887,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       const articleResult = await this.bothubService.generateArticle(
         title,
         questions,
+        context.authorName ?? null,
         this.getUserLogContext(ctx),
       );
 
@@ -1814,6 +2091,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         article?.title || 'Mock Title',
         articleAddition?.content || 'Mock Content',
         factCheckAddition?.content || 'Mock Fact Check',
+        article?.authorName ?? null,
         this.getUserLogContext(ctx),
       );
 
@@ -1908,7 +2186,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const document = ctx.message?.document;
     if (!document) return;
 
-    const state = await this.getUserState(user.id);
+    let state = await this.getUserState(user.id);
+    this.logger.log(
+      `handleDocument: state=${state}, file=${document.file_name}`,
+    );
     const caption = ctx.message?.caption?.trim();
     if (this.isCancelCommand(caption)) {
       await this.handleCancel(ctx);
@@ -1921,6 +2202,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           'Введите тему статьи текстом или используйте /same.',
       );
       return;
+    }
+
+    // Файл, присланный сразу на шаге выбора источника вопросов, принимаем
+    // без предварительного нажатия кнопки «Загрузить свои»
+    if (state === 'WAITING_FOR_QUESTIONS_CHOICE') {
+      await this.setUserState(user.id, 'WAITING_FOR_QUESTIONS_FILE');
+      state = 'WAITING_FOR_QUESTIONS_FILE';
     }
 
     if (!this.isFileUploadState(state)) {
@@ -1945,7 +2233,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const buffer = await this.downloadDocumentBuffer(document.file_id);
+    let buffer: Buffer | null;
+    try {
+      buffer = await this.downloadDocumentBuffer(document.file_id);
+    } catch (downloadError) {
+      this.logger.error(`downloadDocumentBuffer error: ${downloadError}`);
+      await ctx.reply(
+        this.localesService.t('errors.docx_read_failed') ||
+          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
     if (!buffer) {
       await ctx.reply(
         this.localesService.t('errors.docx_read_failed') ||
@@ -1954,7 +2252,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const text = await DocxUtil.extractText(buffer);
+    let text: string;
+    try {
+      text = await DocxUtil.extractText(buffer);
+    } catch (extractError) {
+      this.logger.error(`DocxUtil.extractText error: ${extractError}`);
+      await ctx.reply(
+        this.localesService.t('errors.docx_read_failed') ||
+          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+      );
+      return;
+    }
     if (!text) {
       await ctx.reply(
         this.localesService.t('errors.docx_empty') ||
@@ -2033,17 +2341,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     if (state === 'WAITING_FOR_QUESTIONS_FILE') {
       const context = await this.getUserContext(user.id);
+      this.logger.log(
+        `handleDocument QUESTIONS_FILE: articleId=${context?.articleId}, title=${context?.title}`,
+      );
       if (!context || !context.articleId || !context.title) {
+        this.logger.error(
+          `handleDocument QUESTIONS_FILE: missing context. context=${JSON.stringify(context)}`,
+        );
         await ctx.reply(this.localesService.t('errors.generation_failed'));
         return;
       }
-      await this.generateArticleFromQuestions(ctx, {
-        userId: user.id,
-        articleId: context.articleId,
-        title: context.title,
-        questions: text,
-        context: { ...context, questions: text },
-      });
+      try {
+        await this.promptAuthorSelection(user.id, ctx, {
+          ...context,
+          questions: text,
+        });
+      } catch (error) {
+        this.logger.error(`promptAuthorSelection error: ${error}`);
+        await ctx.reply(this.localesService.t('errors.generation_failed'));
+      }
       return;
     }
 
@@ -2097,6 +2413,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       const result = await this.bothubService.seoRewriteArticle(
         articleAddition?.content || 'Mock Article Content',
         text,
+        article?.authorName ?? null,
         this.getUserLogContext(ctx),
       );
 
@@ -2277,17 +2594,37 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
+      const rawContent =
+        articleAddition?.content || 'Mock Content for Uniqueness';
+      // SEO-метаданные и блоки иллюстраций в LLM не отправляем: вместо картинок
+      // подставляем маркеры {{IMAGE_N}} и восстанавливаем блоки после ответа
+      const { body, metadata } = extractArticleBodyWithMarkers(rawContent);
       const result = await this.bothubService.makeArticleUnique(
-        articleAddition?.content || 'Mock Content for Uniqueness',
+        body,
+        article?.authorName ?? null,
         this.getUserLogContext(ctx),
       );
 
-      await this.sendGenerationResult(ctx, result, 'unique_article');
+      const missingMarkers = findMissingImageMarkers(result.content, metadata);
+      if (missingMarkers.length > 0) {
+        this.logger.error(
+          `Uniquification lost image markers: ${missingMarkers.join(', ')}`,
+        );
+        throw new Error('LLM removed image markers during uniquification');
+      }
+
+      const restoredContent = restoreArticleMetadata(result.content, metadata);
+
+      await this.sendGenerationResult(
+        ctx,
+        { ...result, content: restoredContent },
+        'unique_article',
+      );
 
       await this.setUserContext(user.id, {
         articleId: article?.id,
         articleContent: articleAddition?.content,
-        rewrittenArticleContent: result.content,
+        rewrittenArticleContent: restoredContent,
       });
       await this.setUserState(user.id, 'WAITING_FOR_UNIQUENESS_CONFIRMATION');
 
@@ -2450,12 +2787,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.setUserContext(user.id, { articleId: article?.id });
-    await this.setUserState(user.id, 'WAITING_FOR_SEO_TZ_FILE');
+    await this.setUserState(user.id, 'WAITING_FOR_SEO_AUTHOR_SELECTION');
 
     await ctx.answerCallbackQuery();
     await ctx.reply(
-      this.localesService.t('article.seo_tz_request') ||
-        'Для сео-оптимизации пришлите ТЗ в формате docx.',
+      this.localesService.t('article.seo_choose_author') ||
+        'Хотите применить авторский стиль к этому тексту?',
+      { reply_markup: this.buildAuthorSelectionKeyboard(article?.authorName) },
     );
   }
 
@@ -2503,7 +2841,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.answerCallbackQuery();
     try {
       const textUid = await this.textRuService.createCheck(
-        articleAddition?.content || 'Mock Content for Uniqueness',
+        extractArticleBody(
+          articleAddition?.content || 'Mock Content for Uniqueness',
+        ),
         this.getUserLogContext(ctx),
       );
       if (article) {
@@ -3190,4 +3530,3 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
-

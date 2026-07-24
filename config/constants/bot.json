@@ -14,6 +14,8 @@
     "scenario_prefix": "scenario:",
     "confirm_questions": "confirm_questions",
     "edit_questions": "edit_questions",
+    "generate_questions_choice": "generate_questions_choice",
+    "upload_questions_choice": "upload_questions_choice",
     "regenerate_questions": "regenerate_questions",
     "confirm_title": "confirm_title",
     "reenter_title": "reenter_title",
@@ -29,6 +31,7 @@
     "products": "products",
     "rubrics": "rubrics",
     "seo_optimization": "seo_optimization",
+    "author_select_prefix": "author_select:",
     "check_uniqueness": "check_uniqueness",
     "download_files": "download_files",
     "download_prefix": "download:"
