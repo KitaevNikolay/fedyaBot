@@ -1,0 +1,32 @@
+{
+  "01_generate_article_system.md": {
+    "id": "a88b6b62-d962-44c7-8992-8d1944333e6c",
+    "title": "Генерация статьи системный промт (generate_article)",
+    "url": "/doc/generaciya-stati-sistemnyj-promt-generate_article-K1OLbjvBoF"
+  },
+  "02_generate_article_user.md": {
+    "id": "05667b61-182c-4073-8f78-262ad675a14f",
+    "title": "Генерация статьи пользовательский промт (generate_article)",
+    "url": "/doc/generaciya-stati-polzovatelskij-promt-generate_article-OEpveeCKwa"
+  },
+  "03_rewrite_article_user.md": {
+    "id": "83a427aa-4635-449c-9aa8-41d01d301ab8",
+    "title": "Переписать статью с фак-чеком. Пользовательский промпт (rewrite_article)",
+    "url": "/doc/perepisat-statyu-s-fak-chekom-polzovatelskij-prompt-rewrite_article-ARI7GTbRoA"
+  },
+  "04_article_uniqueness_user.md": {
+    "id": "39bfeb5e-8be3-4284-9f30-d91cb79a65bf",
+    "title": "Уникализация статьи пользовательские промт (article_uniqueness)",
+    "url": "/doc/unikalizaciya-stati-polzovatelskie-promt-article_uniqueness-QtE4jZQRkk"
+  },
+  "05_seo_rewrite_system.md": {
+    "id": "299ccf85-097a-477c-87a4-78b5cb3f789c",
+    "title": "Переписать статью под SEO ТЗ системный (seo_rewrite_article) V2",
+    "url": "/doc/perepisat-statyu-pod-seo-tz-sistemnyj-seo_rewrite_article-v2-kUsWcecYXr"
+  },
+  "06_seo_rewrite_user.md": {
+    "id": "1dd0ad61-6a38-4851-8e64-fc7c815a2584",
+    "title": "Переписать статью под SEO ТЗ пользовательский (seo_rewrite_article)",
+    "url": "/doc/perepisat-statyu-pod-seo-tz-polzovatelskij-seo_rewrite_article-zTldbBmjQ0"
+  }
+}

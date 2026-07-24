@@ -35,6 +35,7 @@ export class BothubService {
   async generateArticle(
     articleSubject: string,
     questionsContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
@@ -43,6 +44,7 @@ export class BothubService {
         article_subject: articleSubject,
         'QUESTION.content': questionsContent,
         today: this.getToday(),
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -69,6 +71,7 @@ export class BothubService {
     articleSubject: string,
     articleContent: string,
     factCheckContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
@@ -77,6 +80,7 @@ export class BothubService {
         article_subject: articleSubject,
         'ARTICLE.content': articleContent,
         'FACT_CHECK.content': factCheckContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -85,6 +89,7 @@ export class BothubService {
   async seoRewriteArticle(
     articleContent: string,
     seoTzContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
@@ -92,6 +97,7 @@ export class BothubService {
       {
         'SEO_TZ.content': seoTzContent,
         'ARTICLE.content': articleContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -127,12 +133,14 @@ export class BothubService {
 
   async makeArticleUnique(
     articleContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
       'article_uniqueness',
       {
         'ARTICLE.content': articleContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
