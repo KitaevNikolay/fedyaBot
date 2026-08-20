@@ -4,6 +4,10 @@ import { lastValueFrom } from 'rxjs';
 import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
 import {
+  classifyBothubError,
+  getBothubErrorCode,
+} from './bothub-error.helpers';
+import {
   BothubBalanceResponse,
   BothubGenerationError,
   BothubModelListResponse,
@@ -39,7 +43,7 @@ export class BothubApiClientService {
   ): Promise<GenerationResult> {
     const apiConfig = this.runtimeConfig.getApiConfig();
     const url = apiConfig.url;
-    const payload = this.buildGenerationPayload(
+    let payload = this.buildGenerationPayload(
       userContent,
       settings,
       systemContent,
@@ -47,6 +51,7 @@ export class BothubApiClientService {
 
     const retries = BothubApiClientService.RETRY_DELAYS_MS.length;
     let lastError: unknown;
+    let pluginsDropped = false;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
@@ -59,11 +64,30 @@ export class BothubApiClientService {
       } catch (error) {
         lastError = error;
 
+        // Bothub перестал принимать веб-поиск для этой модели. Повторяем без
+        // plugins: лучше текст без веб-источников, чем никакого. Смена payload
+        // не тратит попытку ретрая.
+        if (
+          getBothubErrorCode(error) === 'PLUGINS_ARE_NOT_SUPPORTED' &&
+          !pluginsDropped &&
+          payload.plugins !== undefined
+        ) {
+          pluginsDropped = true;
+          payload = this.stripPlugins(payload);
+          attempt -= 1;
+          this.logger.warn(
+            `Model ${payload.model} rejected the web plugin (stage: ${settings?.type ?? 'unknown'}); retrying without plugins`,
+          );
+          continue;
+        }
+
         if (attempt >= retries || !this.isRetriableError(error)) {
           break;
         }
 
-        const delay = BothubApiClientService.RETRY_DELAYS_MS[attempt];
+        const delay =
+          classifyBothubError(error).retryAfterMs ??
+          BothubApiClientService.RETRY_DELAYS_MS[attempt];
         this.logger.warn(
           `Bothub generation failed (${settings?.type ?? 'unknown'}): ${error}. ` +
             `Retry ${attempt + 1}/${retries} in ${delay}ms`,
@@ -91,7 +115,7 @@ export class BothubApiClientService {
     const status = (error as { response?: { status?: number } }).response
       ?.status;
     if (typeof status === 'number') {
-      return status >= 500;
+      return status >= 500 || status === 429;
     }
 
     const code = (error as { code?: string }).code;
@@ -122,6 +146,13 @@ export class BothubApiClientService {
     );
   }
 
+  /** Убирает блок веб-поиска, откуда бы он ни пришёл — из кода или из additionalPayload. */
+  private stripPlugins(payload: Record<string, any>): Record<string, any> {
+    const { plugins: _plugins, ...rest } = payload;
+
+    return rest;
+  }
+
   async getBalance(
     userContext?: Record<string, unknown>,
   ): Promise<{ planType: string; availableBalance: number }> {
@@ -136,7 +167,7 @@ export class BothubApiClientService {
 
       if (data.error?.message === 'UNAUTHORIZED') {
         this.logger.error('Bothub API unauthorized');
-        throw new Error('РћС€РёР±РєР° Р°РІС‚РѕСЂРёР·Р°С†РёРё РІ Bothub');
+        throw new Error('Ошибка авторизации в Bothub');
       }
 
       const availableBalance =
@@ -154,7 +185,7 @@ export class BothubApiClientService {
       }
 
       return {
-        planType: data.subscription?.plan?.type || 'РќРµРёР·РІРµСЃС‚РЅРѕ',
+        planType: data.subscription?.plan?.type || 'Неизвестно',
         availableBalance,
       };
     } catch (error) {
@@ -313,7 +344,7 @@ export class BothubApiClientService {
     }
 
     const cleanContent = content.replace(
-      /\s*\(\s*РџРѕС‚СЂР°С‡РµРЅРѕ С‚РѕРєРµРЅРѕРІ:\s*.*\)\s*$/s,
+      /\s*\(\s*Потрачено токенов:\s*.*\)\s*$/s,
       '',
     );
 

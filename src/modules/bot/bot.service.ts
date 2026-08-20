@@ -26,6 +26,7 @@ import {
   BothubService,
   GenerationResult,
 } from '../bothub/bothub.service';
+import { classifyBothubError } from '../bothub/bothub-error.helpers';
 import { RedisService } from '../redis/redis.service';
 import { ScenariosService } from '../scenarios/scenarios.service';
 import { SessionsService } from '../sessions/sessions.service';
@@ -860,7 +861,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await ctx.reply(this.localesService.t('errors.generation_failed'));
+    // Отделяем «сервис недоступен, повторите позже» от «ошибка настроек,
+    // нужен администратор»: в первом случае повтор осмыслен, во втором нет.
+    const failure = classifyBothubError(error);
+    this.logger.warn(
+      `Generation failed (kind: ${failure.kind}, status: ${failure.status ?? 'none'}, code: ${failure.code ?? 'none'})`,
+    );
+    await ctx.reply(this.localesService.t(failure.messageKey));
   }
 
   private async logGenerationError(
