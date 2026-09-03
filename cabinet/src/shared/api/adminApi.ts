@@ -10,8 +10,8 @@ import type {
   GenerationSettingsResponse,
   GenerationSettingsUpdatePayload,
   HistoryUser,
-  TelegramAuthPayload,
-  TelegramAuthResponse,
+  MessengerAuthResponse,
+  RequestAuthCodeResponse,
   TokenAnalyticsResponse,
   UserHistoryDaysResponse,
   UserHistoryTimelineResponse,
@@ -120,14 +120,16 @@ export const adminApi = {
       body: JSON.stringify({ role }),
     });
   },
-  verifyTelegramAuth(payload: TelegramAuthPayload) {
-    return request<TelegramAuthResponse>('/admin/auth/telegram', {
+  requestAuthCode(login: string) {
+    return request<RequestAuthCodeResponse>('/admin/auth/request-code', {
       method: 'POST',
-      body: JSON.stringify({
-        ...payload,
-        id: String(payload.id),
-        auth_date: String(payload.auth_date),
-      }),
+      body: JSON.stringify({ login }),
+    });
+  },
+  verifyAuthCode(login: string, code: string) {
+    return request<MessengerAuthResponse>('/admin/auth/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ login, code }),
     });
   },
   getCurrentAdmin() {

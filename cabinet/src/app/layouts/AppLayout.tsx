@@ -98,8 +98,8 @@ export function AppLayout() {
               {pageTitle}
             </Typography.Title>
             <Typography.Paragraph className="page-subtitle">
-              Доступ к кабинету открыт только после авторизации через Telegram
-              для пользователей с ролью <code>admin</code>. Настройки
+              Доступ к кабинету открыт только после входа по коду из Яндекс
+              Мессенджера для пользователей с ролью <code>admin</code>. Настройки
               генерации, история действий и аналитика доступны из бокового
               меню после проверки серверной сессии.
             </Typography.Paragraph>

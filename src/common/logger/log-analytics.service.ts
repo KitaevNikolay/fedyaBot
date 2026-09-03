@@ -24,6 +24,7 @@ const MAPPED_KEYS = new Set([
   'tokens',
   'requestBody',
   'responseBody',
+  'messengerId',
   'telegramId',
   'username',
   'firstName',
@@ -90,7 +91,10 @@ export class LogAnalyticsService {
           continue;
         }
 
-        const eventData = await this.buildEventData(payload as LogPayload, 'import');
+        const eventData = await this.buildEventData(
+          payload as LogPayload,
+          'import',
+        );
         await this.prisma.analyticsEvent.upsert({
           where: { dedupeKey: eventData.dedupeKey },
           create: eventData,
@@ -116,10 +120,12 @@ export class LogAnalyticsService {
     source: string,
   ): Promise<Prisma.AnalyticsEventCreateInput> {
     const occurredAt = this.parseDate(payload.timestamp);
-    const telegramId = this.asString(payload.telegramId);
+    // Старые логи (до переезда на Яндекс Мессенджер) несут telegramId
+    const messengerId =
+      this.asString(payload.messengerId) ?? this.asString(payload.telegramId);
     const userIdFromPayload = this.asString(payload.userId);
     const user =
-      userIdFromPayload || !telegramId
+      userIdFromPayload || !messengerId
         ? userIdFromPayload
           ? await this.prisma.user.findUnique({
               where: { id: userIdFromPayload },
@@ -127,7 +133,7 @@ export class LogAnalyticsService {
             })
           : null
         : await this.prisma.user.findUnique({
-            where: { telegramId },
+            where: { messengerId },
             select: { id: true },
           });
     const userId = user?.id ?? userIdFromPayload ?? undefined;
@@ -139,10 +145,14 @@ export class LogAnalyticsService {
     );
 
     const articleId =
-      this.asString(payload.articleId) ?? matchedSession?.articleId ?? undefined;
+      this.asString(payload.articleId) ??
+      matchedSession?.articleId ??
+      undefined;
     const articleTitle = await this.findArticleTitle(articleId);
     const scenarioId =
-      this.asString(payload.scenarioId) ?? matchedSession?.scenarioId ?? undefined;
+      this.asString(payload.scenarioId) ??
+      matchedSession?.scenarioId ??
+      undefined;
 
     const sanitizedRaw = this.sanitizeValue(payload);
     const dedupeKey = this.computeDedupeKey(sanitizedRaw);
@@ -166,7 +176,7 @@ export class LogAnalyticsService {
       responseBody: this.asInputJsonValue(payload.responseBody, true),
       metadata: this.getMetadata(payload),
       raw: this.asInputJsonValue(sanitizedRaw, false) as Prisma.InputJsonValue,
-      telegramId,
+      messengerId,
       username: this.asString(payload.username),
       firstName: this.asString(payload.firstName),
       lastName: this.asString(payload.lastName),
@@ -234,7 +244,10 @@ export class LogAnalyticsService {
     const eventType = this.asString(payload.type);
     const callbackData = this.asString(payload.callbackData);
 
-    if (eventType === 'external_response' && this.asString(payload.integration) === 'bothub') {
+    if (
+      eventType === 'external_response' &&
+      this.asString(payload.integration) === 'bothub'
+    ) {
       return 'llm_request';
     }
 
@@ -257,7 +270,8 @@ export class LogAnalyticsService {
   }
 
   private extractTokens(payload: LogPayload) {
-    const directUsage = this.asNumber(payload.usage) ?? this.asNumber(payload.tokens);
+    const directUsage =
+      this.asNumber(payload.usage) ?? this.asNumber(payload.tokens);
 
     if (directUsage !== undefined) {
       return directUsage;
@@ -303,9 +317,7 @@ export class LogAnalyticsService {
   }
 
   private computeDedupeKey(value: Prisma.JsonValue) {
-    return createHash('sha1')
-      .update(this.stableStringify(value))
-      .digest('hex');
+    return createHash('sha1').update(this.stableStringify(value)).digest('hex');
   }
 
   private stableStringify(value: Prisma.JsonValue): string {
@@ -314,7 +326,7 @@ export class LogAnalyticsService {
     }
 
     if (Array.isArray(value)) {
-      return `[${value.map(item => this.stableStringify(item)).join(',')}]`;
+      return `[${value.map((item) => this.stableStringify(item)).join(',')}]`;
     }
 
     if (typeof value === 'object') {
@@ -332,10 +344,7 @@ export class LogAnalyticsService {
     return JSON.stringify(value);
   }
 
-  private sanitizeValue(
-    value: unknown,
-    depth = 0,
-  ): Prisma.JsonValue {
+  private sanitizeValue(value: unknown, depth = 0): Prisma.JsonValue {
     if (value === null || value === undefined) {
       return null;
     }
@@ -359,7 +368,7 @@ export class LogAnalyticsService {
     if (Array.isArray(value)) {
       return value
         .slice(0, 20)
-        .map(item => this.sanitizeValue(item, depth + 1));
+        .map((item) => this.sanitizeValue(item, depth + 1));
     }
 
     if (typeof value === 'object') {

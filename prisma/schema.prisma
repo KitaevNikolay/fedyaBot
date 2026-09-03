@@ -10,7 +10,8 @@ datasource db {
 
 model User {
   id         String    @id @default(uuid())
-  telegramId String    @unique
+  /// Логин пользователя в Яндекс Мессенджере (до миграции — Telegram ID)
+  messengerId String   @unique
   isActive   Boolean   @default(false)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -133,7 +134,7 @@ model AnalyticsEvent {
   responseBody Json?
   metadata     Json?
   raw          Json
-  telegramId   String?
+  messengerId  String?
   username     String?
   firstName    String?
   lastName     String?

@@ -26,6 +26,26 @@ export class RedisService {
     await this.set(key, JSON.stringify(value), ttl);
   }
 
+  /** Неблокирующий обход ключей по маске (KEYS на больших базах блокирует Redis). */
+  async scanKeys(pattern: string): Promise<string[]> {
+    const keys: string[] = [];
+    let cursor = '0';
+
+    do {
+      const [nextCursor, batch] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        pattern,
+        'COUNT',
+        100,
+      );
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== '0');
+
+    return [...new Set(keys)];
+  }
+
   async getJson<T>(key: string): Promise<T | null> {
     const value = await this.get(key);
     if (!value) {

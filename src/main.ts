@@ -1,8 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
-import { webhookCallback } from 'grammy';
-import { json, NextFunction, Request, Response } from 'express';
+import { json, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { AppLoggerService } from './common/logger/app-logger.service';
 import { BotService } from './modules/bot/bot.service';
@@ -33,27 +32,24 @@ async function bootstrap() {
       whitelist: true,
     }),
   );
-  const webhookUrl = configService.get<string>('TELEGRAM_WEBHOOK_URL');
+
+  // Вебхук Яндекс Мессенджера. Сервер Яндекса ждёт ответ не дольше секунды,
+  // поэтому отвечаем сразу, а обновления обрабатываем в фоне; повторные
+  // доставки одного update_id отсекает дедупликация в BotService.
+  const webhookUrl = configService.get<string>('YANDEX_WEBHOOK_URL');
   if (webhookUrl) {
     const webhookPath = new URL(webhookUrl).pathname;
-    type WebhookHandler = (
-      req: Request,
-      res: Response,
-      next?: NextFunction,
-    ) => unknown;
-    let handler: WebhookHandler | null = null;
     app.use(
       webhookPath,
-      json(),
-      (req: Request, res: Response, next: NextFunction) => {
-        if (!handler) {
-          const botService = app.get(BotService);
-          handler = webhookCallback(
-            botService.getBot(),
-            'express',
-          ) as WebhookHandler;
+      json({ limit: '2mb' }),
+      (req: Request, res: Response) => {
+        if (req.method !== 'POST') {
+          res.status(405).json({ ok: false, description: 'POST expected' });
+          return;
         }
-        return handler(req, res, next);
+        const botService = app.get(BotService);
+        const accepted = botService.getBot().handleWebhookBody(req.body);
+        res.status(200).json({ ok: true, accepted });
       },
     );
   }

@@ -48,4 +48,15 @@ export class BothubRuntimeConfigService {
   isMockMode() {
     return this.configService.get<string>('BOTHUB_MOCK_MODE') === 'true';
   }
+
+  /**
+   * Встроенный веб-поиск Bothub. Включён по умолчанию; переменная
+   * BOTHUB_WEB_SEARCH_ENABLED=false отключает плагин, если модель или тариф
+   * его не поддерживают.
+   */
+  isWebSearchEnabled() {
+    return (
+      this.configService.get<string>('BOTHUB_WEB_SEARCH_ENABLED') !== 'false'
+    );
+  }
 }

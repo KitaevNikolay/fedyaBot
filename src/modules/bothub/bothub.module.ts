@@ -8,8 +8,17 @@ import { BothubGenerationResolverService } from './bothub-generation-resolver.se
 import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
 import { BothubService } from './bothub.service';
 
+// Страховка на случай запроса без явного timeout: генерация статьи в
+// BothubApiClientService и так ограничена 30 минутами на вызов.
+const BOTHUB_HTTP_TIMEOUT_MS = 1_800_000;
+
 @Module({
-  imports: [ConfigModule, HttpModule, OutlineModule, GenerationSettingsModule],
+  imports: [
+    ConfigModule,
+    HttpModule.register({ timeout: BOTHUB_HTTP_TIMEOUT_MS }),
+    OutlineModule,
+    GenerationSettingsModule,
+  ],
   providers: [
     BothubRuntimeConfigService,
     BothubGenerationResolverService,

@@ -2,6 +2,7 @@ export type PromptPlaceholderKey =
   | 'article_subject'
   | 'today'
   | 'author_name'
+  | 'author_style'
   | 'QUESTION.content'
   | 'ARTICLE.content'
   | 'FACT_CHECK.content'
@@ -18,6 +19,7 @@ const PLACEHOLDER_LABELS: Record<PromptPlaceholderKey, string> = {
   article_subject: 'Тема статьи',
   today: 'Текущая дата',
   author_name: 'Стиль автора',
+  author_style: 'Описание стиля автора (из коллекции стилей)',
   'QUESTION.content': 'Сгенерированные вопросы',
   'ARTICLE.content': 'Текст статьи',
   'FACT_CHECK.content': 'Результат факт-чека',
@@ -48,6 +50,7 @@ export const PROMPT_PLACEHOLDERS_BY_TYPE: Record<
     createPlaceholder('QUESTION.content'),
     createPlaceholder('today'),
     createPlaceholder('author_name'),
+    createPlaceholder('author_style'),
   ],
   generate_fact_check: [
     createPlaceholder('ARTICLE.content'),

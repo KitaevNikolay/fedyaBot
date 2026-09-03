@@ -5,22 +5,25 @@ import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
 import {
   BothubBalanceResponse,
+  BothubGenerationError,
   BothubModelListResponse,
   BothubModelOption,
   BothubResponse,
+  BothubStreamAbortedError,
   GenerationResult,
   GenerationSettingsPayload,
 } from './bothub.types';
 
 @Injectable()
 export class BothubApiClientService {
+  /** Паузы перед повторами транзиентного сбоя генерации */
+  private static readonly RETRY_DELAYS_MS = [2000, 6000];
+
   private readonly logger = new Logger(BothubApiClientService.name);
-  private modelsCache:
-    | {
-        expiresAt: number;
-        items: BothubModelOption[];
-      }
-    | null = null;
+  private modelsCache: {
+    expiresAt: number;
+    items: BothubModelOption[];
+  } | null = null;
 
   constructor(
     private readonly httpService: HttpService,
@@ -42,21 +45,81 @@ export class BothubApiClientService {
       systemContent,
     );
 
-    try {
-      const response = await this.postWithLogging<BothubResponse>(
-        url,
-        payload,
-        {
+    const retries = BothubApiClientService.RETRY_DELAYS_MS.length;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const assembled = await this.postStreamWithLogging(url, payload, {
           stage: settings?.type,
           ...userContext,
-        },
-      );
+        });
 
-      return this.extractGenerationResult(response.data);
-    } catch (error) {
-      this.logger.error(`Failed to generate content: ${error}`);
-      throw error;
+        return this.extractGenerationResult(assembled);
+      } catch (error) {
+        lastError = error;
+
+        if (attempt >= retries || !this.isRetriableError(error)) {
+          break;
+        }
+
+        const delay = BothubApiClientService.RETRY_DELAYS_MS[attempt];
+        this.logger.warn(
+          `Bothub generation failed (${settings?.type ?? 'unknown'}): ${error}. ` +
+            `Retry ${attempt + 1}/${retries} in ${delay}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
+
+    this.logger.error(`Failed to generate content: ${lastError}`);
+    throw this.toGenerationError(lastError);
+  }
+
+  /**
+   * Повторяем только то, что заведомо не дошло до модели: отказ соединения,
+   * сбой DNS и ошибки шлюза. ECONNRESET и таймаут ответа сознательно не
+   * повторяем — генерация могла отработать и списаться, а повтор оплатит её
+   * второй раз.
+   */
+  private isRetriableError(error: unknown) {
+    // Оборванный поток ничего не доставил — повтор не оплачивает результат дважды
+    if (error instanceof BothubStreamAbortedError) {
+      return true;
+    }
+
+    const status = (error as { response?: { status?: number } }).response
+      ?.status;
+    if (typeof status === 'number') {
+      return status >= 500;
+    }
+
+    const code = (error as { code?: string }).code;
+    return code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND';
+  }
+
+  /** Достаёт из ответа Bothub код ошибки, чтобы бот показал внятную причину */
+  private toGenerationError(error: unknown) {
+    if (!(error as { isAxiosError?: boolean })?.isAxiosError) {
+      return error;
+    }
+
+    const response = (
+      error as {
+        response?: {
+          status?: number;
+          data?: { error?: { message?: string; code?: string } };
+        };
+      }
+    ).response;
+    const apiError = response?.data?.error;
+
+    return new BothubGenerationError(
+      apiError?.message ??
+        (error instanceof Error ? error.message : String(error)),
+      response?.status,
+      apiError?.code,
+    );
   }
 
   async getBalance(
@@ -76,9 +139,23 @@ export class BothubApiClientService {
         throw new Error('РћС€РёР±РєР° Р°РІС‚РѕСЂРёР·Р°С†РёРё РІ Bothub');
       }
 
+      const availableBalance =
+        data.subscription?.availableBalance ??
+        data.subscription?.available_balance;
+
+      // Раньше отсутствующее поле схлопывалось в 0 через `|| 0`: кабинет
+      // показывал нулевой баланс, пока счёт реально уходил в минус.
+      // Лучше явная ошибка, чем правдоподобный ноль.
+      if (typeof availableBalance !== 'number') {
+        this.logger.error(
+          'Bothub /auth/me did not return a balance field (availableBalance/available_balance)',
+        );
+        throw new Error('Bothub не вернул баланс');
+      }
+
       return {
         planType: data.subscription?.plan?.type || 'РќРµРёР·РІРµСЃС‚РЅРѕ',
-        availableBalance: data.subscription?.available_balance || 0,
+        availableBalance,
       };
     } catch (error) {
       this.logger.error(`Failed to get balance: ${error}`);
@@ -178,13 +255,18 @@ export class BothubApiClientService {
       bothub: {
         include_usage: true,
       },
-      plugins: [
-        {
-          id: 'web',
-          engine: 'native',
-          max_results: 5,
-        },
-      ],
+      // Плагин веб-поиска подключаем только когда он включён в конфигурации
+      ...(this.runtimeConfig.isWebSearchEnabled()
+        ? {
+            plugins: [
+              {
+                id: 'web',
+                engine: 'native',
+                max_results: 5,
+              },
+            ],
+          }
+        : {}),
     };
 
     if (
@@ -210,8 +292,24 @@ export class BothubApiClientService {
     }
 
     if (!content) {
-      this.logger.warn('Empty response from BotHub');
-      return { content: 'РџСѓСЃС‚Рѕ', usage };
+      const choice = data.choices?.[0];
+      const finishReason = choice?.finish_reason;
+      const reasoningLength = choice?.message?.reasoning?.length ?? 0;
+
+      // Reasoning-модели тратят лимит токенов на рассуждения: при слишком
+      // маленьком maxTokens ответ обрывается ещё до текста. Молча сохранять
+      // такой результат нельзя — это выглядит как «сгенерировалась пустота».
+      if (finishReason === 'length') {
+        throw new Error(
+          `Модель не успела выдать ответ: лимит токенов исчерпан (finish_reason=length, ` +
+            `рассуждений ${reasoningLength} символов). Увеличьте «Максимум токенов» для этого шага в админке.`,
+        );
+      }
+
+      this.logger.warn(
+        `Empty response from BotHub (finish_reason=${finishReason ?? 'unknown'})`,
+      );
+      throw new Error('Модель вернула пустой ответ');
     }
 
     const cleanContent = content.replace(
@@ -259,31 +357,49 @@ export class BothubApiClientService {
     }
   }
 
-  private async postWithLogging<T>(
+  /**
+   * Генерацию запрашиваем потоком. При обычном запросе соединение простаивает,
+   * пока модель думает, и промежуточный узел рвёт его: за всю историю логов ни
+   * один запрос длиннее ~400 секунд не дожил до ответа. В потоке чанки идут
+   * непрерывно, поэтому простоя нет.
+   */
+  private async postStreamWithLogging(
     url: string,
-    payload: unknown,
+    payload: Record<string, unknown>,
     userContext?: Record<string, unknown>,
-  ) {
+  ): Promise<BothubResponse> {
+    const streamPayload = {
+      ...payload,
+      stream: true,
+      // Без этого при стриминге не приходит расход и стоимость шага теряется
+      stream_options: { include_usage: true },
+    };
+
     try {
       await this.appLogger.log({
         type: 'external_request',
         integration: 'bothub',
         method: 'POST',
         url,
-        requestBody: payload,
+        requestBody: streamPayload,
         ...userContext,
       });
 
       const response = await lastValueFrom(
-        this.httpService.post<T>(url, payload, {
+        this.httpService.post(url, streamPayload, {
           headers: {
             'Content-Type': 'application/json',
             ...this.getAuthHeaders(),
           },
           timeout: 1800000,
+          responseType: 'stream',
           maxContentLength: Infinity,
           maxBodyLength: Infinity,
         }),
+      );
+
+      const assembled = await this.consumeGenerationStream(
+        response.data as NodeJS.ReadableStream,
       );
 
       await this.appLogger.log({
@@ -292,15 +408,132 @@ export class BothubApiClientService {
         method: 'POST',
         url,
         status: response.status,
-        responseBody: response.data,
+        responseBody: assembled,
         ...userContext,
       });
 
-      return response;
+      return assembled;
     } catch (error) {
-      await this.logExternalError('POST', url, error, userContext, payload);
-      throw error;
+      // При responseType: 'stream' тело ошибки — тоже поток; дочитываем его,
+      // иначе код ошибки (например NOT_ENOUGH_TOKENS) остался бы недоступен
+      const normalized = await this.materializeStreamError(error);
+      await this.logExternalError(
+        'POST',
+        url,
+        normalized,
+        userContext,
+        streamPayload,
+      );
+      throw normalized;
     }
+  }
+
+  /** Склеивает SSE-чанки Bothub в привычный вид ответа */
+  private async consumeGenerationStream(
+    stream: NodeJS.ReadableStream,
+  ): Promise<BothubResponse> {
+    let buffer = '';
+    let content = '';
+    let reasoning = '';
+    let finishReason: string | undefined;
+    let caps: number | undefined;
+
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) {
+        return;
+      }
+
+      const data = trimmed.slice(5).trim();
+      if (!data || data === '[DONE]') {
+        return;
+      }
+
+      let parsed: {
+        choices?: Array<{
+          delta?: { content?: string | null; reasoning?: string | null };
+          finish_reason?: string | null;
+        }>;
+        usage?: { bothub?: { caps?: number } };
+      };
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        // Битый чанк пропускаем: обрыв ответа поймаем по отсутствию finish_reason
+        return;
+      }
+
+      const choice = parsed.choices?.[0];
+      if (choice?.delta?.content) {
+        content += choice.delta.content;
+      }
+      if (choice?.delta?.reasoning) {
+        reasoning += choice.delta.reasoning;
+      }
+      if (choice?.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+      if (typeof parsed.usage?.bothub?.caps === 'number') {
+        caps = parsed.usage.bothub.caps;
+      }
+    };
+
+    for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        handleLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+      }
+    }
+    handleLine(buffer);
+
+    // Поток, закончившийся без finish_reason, — это оборванный ответ. Отдать
+    // такой текст молча нельзя: получилась бы обрезанная статья без признаков
+    // проблемы.
+    if (!finishReason) {
+      throw new BothubStreamAbortedError(content.length, reasoning.length);
+    }
+
+    return {
+      choices: [
+        {
+          finish_reason: finishReason,
+          message: { content, reasoning },
+        },
+      ],
+      ...(caps !== undefined ? { usage: { bothub: { caps } } } : {}),
+    };
+  }
+
+  /** Заменяет поток в теле ошибки на разобранный объект */
+  private async materializeStreamError(error: unknown) {
+    const response = (error as { response?: { data?: unknown } }).response;
+    const data = response?.data as
+      | (AsyncIterable<Buffer | string> & { on?: unknown })
+      | undefined;
+
+    if (!data || typeof data.on !== 'function') {
+      return error;
+    }
+
+    let raw = '';
+    try {
+      for await (const chunk of data) {
+        raw += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      }
+    } catch {
+      return error;
+    }
+
+    try {
+      response!.data = JSON.parse(raw);
+    } catch {
+      response!.data = raw;
+    }
+
+    return error;
   }
 
   private async logExternalError(
@@ -333,10 +566,16 @@ export class BothubApiClientService {
     };
   }
 
-  private normalizeModelList(payload: BothubModelListResponse): BothubModelOption[] {
+  private normalizeModelList(
+    payload: BothubModelListResponse,
+  ): BothubModelOption[] {
     const source = Array.isArray(payload)
       ? payload
-      : payload.data ?? payload.items ?? payload.results ?? payload.models ?? [];
+      : (payload.data ??
+        payload.items ??
+        payload.results ??
+        payload.models ??
+        []);
     const modelMap = new Map<string, BothubModelOption>();
 
     const addModelOption = (

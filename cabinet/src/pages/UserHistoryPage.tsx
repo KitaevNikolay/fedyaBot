@@ -37,7 +37,7 @@ function getDisplayName(user: {
   firstName: string | null;
   lastName: string | null;
   username: string | null;
-  telegramId: string;
+  messengerId: string;
 }) {
   const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
 
@@ -49,7 +49,7 @@ function getDisplayName(user: {
     return `@${user.username}`;
   }
 
-  return `Telegram ${user.telegramId}`;
+  return `Логин ${user.messengerId}`;
 }
 
 function buildSearchableText(event: UserHistoryTimelineEvent, stageLabel: string) {
@@ -361,7 +361,7 @@ export function UserHistoryPage() {
                     <div>
                       <Typography.Title level={5}>{getDisplayName(user)}</Typography.Title>
                       <Typography.Text type="secondary">
-                        {`Telegram ID: ${user.telegramId}`}
+                        {`Логин Яндекса: ${user.messengerId}`}
                       </Typography.Text>
                     </div>
                     <Space wrap>

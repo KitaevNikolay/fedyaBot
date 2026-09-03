@@ -14,7 +14,10 @@ import {
   UpdateGenerationSettingPayload,
 } from './admin-generation-settings.service';
 import { AdminService } from './admin.service';
-import { TelegramAuthDto } from './dto/telegram-auth.dto';
+import {
+  RequestAuthCodeDto,
+  VerifyAuthCodeDto,
+} from './dto/messenger-auth.dto';
 import { UpdateAdminUserRoleDto } from './dto/update-admin-user-role.dto';
 import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import { PublicAdminRoute } from './public-admin-route.decorator';
@@ -122,10 +125,16 @@ export class AdminController {
     return this.adminService.updateUserRole(id, body.role);
   }
 
-  @Post('auth/telegram')
+  @Post('auth/request-code')
   @PublicAdminRoute()
-  verifyTelegramAuth(@Body() body: TelegramAuthDto) {
-    return this.adminService.verifyTelegramAuth(body);
+  requestAuthCode(@Body() body: RequestAuthCodeDto) {
+    return this.adminService.requestAuthCode(body.login);
+  }
+
+  @Post('auth/verify-code')
+  @PublicAdminRoute()
+  verifyAuthCode(@Body() body: VerifyAuthCodeDto) {
+    return this.adminService.verifyAuthCode(body.login, body.code);
   }
 
   @Get('auth/me')

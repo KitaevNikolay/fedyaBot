@@ -22,8 +22,6 @@ services:
     environment:
       DATABASE_URL: "mysql://fedya:fedya@db:3306/fedya"
       NODE_OPTIONS: "--dns-result-order=ipv4first"
-    extra_hosts:
-      - "api.telegram.org:149.154.167.220"
     volumes:
       - .:/app
       - /app/node_modules
@@ -63,8 +61,6 @@ services:
     build:
       context: .
       dockerfile: cabinet/Dockerfile
-      args:
-        VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-}
     ports:
       - "5173:80"
     depends_on:

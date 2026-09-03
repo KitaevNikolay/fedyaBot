@@ -5,20 +5,27 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
 import {
   ArticleAdditionType,
   TechnicalArticleAdditionState,
 } from '@prisma/client';
-import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
+import {
+  InlineKeyboard,
+  InputFile,
+  MessengerBot,
+  MessengerContext as Context,
+  YandexMessengerApiService,
+} from '../messenger';
 import { DocxUtil } from '../../common/utils/docx.util';
 import { ConstantsService } from '../../config/constants.service';
 import { LocalesService } from '../../config/locales.service';
 import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { ArticlesService } from '../articles/articles.service';
-import { BothubService, GenerationResult } from '../bothub/bothub.service';
+import {
+  BothubGenerationError,
+  BothubService,
+  GenerationResult,
+} from '../bothub/bothub.service';
 import { RedisService } from '../redis/redis.service';
 import { ScenariosService } from '../scenarios/scenarios.service';
 import { SessionsService } from '../sessions/sessions.service';
@@ -43,6 +50,8 @@ type UserContext = {
   rewrittenArticleContent?: string;
   bitrixId?: string;
   authorName?: string;
+  /** code из AUTHOR_OPTIONS: по нему подтягивается описание стиля из Outline */
+  authorCode?: string;
 };
 
 type AuthorOption = {
@@ -51,17 +60,15 @@ type AuthorOption = {
   label: string;
 };
 
-function buildTelegramFileUrl(
-  baseUrl: string | undefined,
-  token: string,
-  filePath: string,
-): string {
-  const normalizedBaseUrl = (baseUrl || 'https://api.telegram.org').replace(
-    /\/+$/,
-    '',
-  );
-  return `${normalizedBaseUrl}/file/bot${token}/${filePath}`;
-}
+/**
+ * Метка «в этом чате прямо сейчас идёт долгая генерация». Живёт в Redis, поэтому
+ * переживает падение процесса: после рестарта по ней видно, кого оборвало.
+ */
+type InterruptedGeneration = {
+  chatId: string;
+  stage: string;
+  startedAt: string;
+};
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
@@ -106,6 +113,23 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     { code: 'none', name: '', label: 'Без стиля автора' },
   ];
 
+  // Человекочитаемые названия шагов для сообщения о прерванной генерации
+  private static readonly GENERATION_STAGE_LABELS: Record<string, string> = {
+    generate_questions: 'генерация вопросов',
+    generate_article: 'генерация статьи',
+    generate_fact_check: 'генерация факт-чека',
+    rewrite_article: 'перепись статьи по факт-чеку',
+    seo_rewrite_article: 'SEO-оптимизация статьи',
+    article_uniqueness: 'уникализация статьи',
+    generate_rubrics: 'подбор рубрик',
+    generate_products: 'подбор продуктов',
+    user_prompt_generation: 'генерация по своему промпту',
+  };
+
+  private static readonly GENERATION_KEY_PREFIX = 'generation:';
+  /** Смещение getUpdates: переживает рестарт, чтобы не перечитывать очередь */
+  private static readonly UPDATES_OFFSET_KEY = 'yandex:updates_offset';
+
   private static readonly FILE_UPLOAD_STATES = new Set([
     'WAITING_FOR_QUESTIONS_FILE',
     'WAITING_FOR_FACT_CHECK_FILE',
@@ -113,14 +137,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     'WAITING_FOR_ARTICLE_FILE',
   ]);
 
-  private bot: Bot<Context>;
-  private botToken: string | null = null;
+  private bot: MessengerBot;
   private uniquenessInterval: NodeJS.Timeout | null = null;
   private pollingStarted = false;
-  private readonly telegramApiBaseUrl?: string;
-  private readonly telegramProxyAgent?:
-    | HttpsProxyAgent<string>
-    | SocksProxyAgent;
+  // Стек шагов на чат: шаги бывают вложенными, и выход из внутреннего
+  // не должен снимать метку с внешнего
+  private readonly generationStages = new Map<string, string[]>();
   private readonly logger = new Logger(BotService.name);
 
   private isCancelCommand(text?: string | null) {
@@ -178,48 +200,24 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     private readonly technicalArticleAdditionsService: TechnicalArticleAdditionsService,
     private readonly textRuService: TextRuService,
     private readonly bitrixService: BitrixService,
-  ) {
-    this.telegramApiBaseUrl = this.configService.get<string>(
-      'TELEGRAM_API_BASE_URL',
-    );
-    const telegramProxyUrl =
-      this.configService.get<string>('TELEGRAM_PROXY_URL');
+    private readonly messengerApi: YandexMessengerApiService,
+  ) {}
 
-    if (telegramProxyUrl) {
-      this.telegramProxyAgent = telegramProxyUrl.startsWith('socks')
-        ? new SocksProxyAgent(telegramProxyUrl)
-        : new HttpsProxyAgent(telegramProxyUrl);
-    }
-  }
-
-  async onModuleInit() {
-    const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
-    if (!token) {
-      throw new Error('TELEGRAM_BOT_TOKEN is required');
+  onModuleInit() {
+    if (!this.messengerApi.isConfigured()) {
+      throw new Error('YANDEX_BOT_TOKEN is required');
     }
 
-    this.botToken = token;
-    this.bot = new Bot<Context>(
-      token,
-      this.telegramApiBaseUrl || this.telegramProxyAgent
-        ? {
-            client: {
-              ...(this.telegramApiBaseUrl
-                ? { apiRoot: this.telegramApiBaseUrl }
-                : {}),
-              ...(this.telegramProxyAgent
-                ? {
-                    baseFetchConfig: {
-                      agent: this.telegramProxyAgent as any,
-                      compress: true,
-                    },
-                  }
-                : {}),
-            },
-          }
-        : undefined,
-    );
-    const webhookUrl = this.configService.get<string>('TELEGRAM_WEBHOOK_URL');
+    this.bot = new MessengerBot(this.messengerApi, {
+      loadOffset: async () => {
+        const raw = await this.redisService.get(BotService.UPDATES_OFFSET_KEY);
+        const parsed = raw ? Number(raw) : NaN;
+        return Number.isFinite(parsed) ? parsed : null;
+      },
+      saveOffset: (offset) =>
+        this.redisService.set(BotService.UPDATES_OFFSET_KEY, String(offset)),
+    });
+    const webhookUrl = this.configService.get<string>('YANDEX_WEBHOOK_URL');
     const startCommand =
       this.constantsService.get<string>('commands.start') ?? 'start';
     const cancelCommand =
@@ -275,9 +273,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           ...userContext,
         });
       }
-      const telegramId = ctx.from?.id?.toString();
-      if (telegramId) {
-        const user = await this.usersService.findByTelegramId(telegramId);
+      const messengerId = ctx.from?.id?.toString();
+      if (messengerId) {
+        const user = await this.usersService.findByMessengerId(messengerId);
         if (user) {
           const state = await this.getUserState(user.id);
           await this.appLogger.log({
@@ -432,7 +430,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     this.bot.callbackQuery(
       [selectScenarioCallback, chooseAnotherScenarioCallback, mainMenuCallback],
       async (ctx) => {
-        if (ctx.callbackQuery.data === mainMenuCallback) {
+        if (ctx.callbackQuery?.data === mainMenuCallback) {
           await this.handleStart(ctx);
           await ctx.answerCallbackQuery();
         } else {
@@ -604,42 +602,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.handleDocument(ctx);
     });
 
-    try {
-      // Don't await setMyCommands to prevent blocking app startup if Telegram API hangs
-      this.bot.api
-        .setMyCommands([
-          {
-            command: startCommand,
-            description: this.localesService.t('commands.start'),
-          },
-          {
-            command: cancelCommand,
-            description: this.localesService.t('commands.cancel'),
-          },
-          {
-            command: menuCommand,
-            description: this.localesService.t('commands.menu'),
-          },
-        ])
-        .catch((error) => {
-          this.logger.warn(`Failed to set bot commands: ${error}`);
-        });
-    } catch (error) {
-      this.logger.warn(`Failed to set bot commands synchronously: ${error}`);
-    }
-
     if (webhookUrl) {
-      this.bot.api
+      // Вебхук: обновления принимает main.ts и отдаёт в bot.handleWebhookBody
+      this.messengerApi
         .setWebhook(webhookUrl)
         .then(() => {
-          this.logger.log('Telegram webhook set');
+          this.logger.log(`Yandex Messenger webhook set: ${webhookUrl}`);
         })
         .catch((error) => {
-          this.logger.warn(`Failed to set Telegram webhook: ${error}`);
+          this.logger.warn(`Failed to set Yandex Messenger webhook: ${error}`);
         });
     } else {
       this.startPolling();
     }
+
+    // Не блокируем старт: рассылка уведомлений о прерванных генерациях
+    // зависит от доступности Bot API Яндекса
+    void this.recoverInterruptedGenerations().catch((error) => {
+      this.logger.warn(`Failed to recover interrupted generations: ${error}`);
+    });
 
     this.uniquenessInterval = setInterval(() => {
       void this.processUniquenessChecks();
@@ -668,7 +649,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  getBot(): Bot<Context> {
+  getBot(): MessengerBot {
     if (!this.bot) {
       throw new Error('Bot is not initialized');
     }
@@ -703,9 +684,151 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await this.redisService.del(`context:${userId}`);
   }
 
+  // Отметки о незавершённых генерациях
+
+  private getGenerationKey(chatId: string) {
+    return `${BotService.GENERATION_KEY_PREFIX}${chatId}`;
+  }
+
+  /**
+   * Помечает чат как «идёт долгая генерация» на время выполнения run().
+   * Метка снимается в finally — в Redis она остаётся только если процесс
+   * умер посреди шага (рестарт контейнера, OOM, kill). Такие «висяки»
+   * разбирает recoverInterruptedGenerations на следующем старте.
+   */
+  private async withGenerationGuard<T>(
+    ctx: Context,
+    stage: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const chatId = ctx.chat?.id || ctx.from?.id;
+    if (!chatId) {
+      return run();
+    }
+
+    const stages = this.generationStages.get(chatId) ?? [];
+    stages.push(stage);
+    this.generationStages.set(chatId, stages);
+    await this.writeGenerationMarker(chatId, stage);
+
+    try {
+      return await run();
+    } finally {
+      stages.pop();
+      const outerStage = stages[stages.length - 1];
+
+      if (outerStage) {
+        // Вернулись во внешний шаг — метку не снимаем, а переписываем на него
+        await this.writeGenerationMarker(chatId, outerStage);
+      } else {
+        this.generationStages.delete(chatId);
+        await this.redisService
+          .del(this.getGenerationKey(chatId))
+          .catch((error) => {
+            this.logger.warn(`Failed to clear generation marker: ${error}`);
+          });
+      }
+    }
+  }
+
+  private async writeGenerationMarker(chatId: string, stage: string) {
+    const marker: InterruptedGeneration = {
+      chatId,
+      stage,
+      startedAt: new Date().toISOString(),
+    };
+
+    try {
+      await this.redisService.setJson(
+        this.getGenerationKey(chatId),
+        marker,
+        10800,
+      );
+    } catch (error) {
+      // Метка — вспомогательная: её потеря не должна ронять саму генерацию
+      this.logger.warn(`Failed to write generation marker: ${error}`);
+    }
+  }
+
+  /**
+   * На старте разбирает метки, оставшиеся от генераций, которые оборвал
+   * предыдущий процесс: пользователь иначе бесконечно ждёт ответ, которого
+   * уже никто не пришлёт. Состояние пользователя не сбрасываем — шаг обычно
+   * можно повторить кнопкой из предыдущего сообщения.
+   */
+  private async recoverInterruptedGenerations() {
+    let keys: string[];
+    try {
+      keys = await this.redisService.scanKeys(
+        `${BotService.GENERATION_KEY_PREFIX}*`,
+      );
+    } catch (error) {
+      this.logger.warn(`Failed to scan generation markers: ${error}`);
+      return;
+    }
+
+    if (keys.length === 0) {
+      return;
+    }
+
+    this.logger.warn(`Found ${keys.length} interrupted generation(s)`);
+
+    for (const key of keys) {
+      let marker: InterruptedGeneration | null = null;
+      try {
+        marker = await this.redisService.getJson<InterruptedGeneration>(key);
+      } catch (error) {
+        this.logger.warn(`Failed to read generation marker ${key}: ${error}`);
+      }
+
+      // Снимаем метку до отправки: иначе упавший sendMessage заставит бота
+      // слать это же уведомление на каждом следующем старте
+      await this.redisService.del(key).catch(() => undefined);
+
+      const chatId =
+        marker?.chatId ?? key.slice(BotService.GENERATION_KEY_PREFIX.length);
+      if (!chatId) {
+        continue;
+      }
+
+      const stageLabel =
+        (marker?.stage && BotService.GENERATION_STAGE_LABELS[marker.stage]) ??
+        'генерация';
+
+      // Пишем событие до отправки: обрыв генерации важен для аналитики
+      // независимо от того, дошло ли уведомление до чата
+      await this.appLogger.log({
+        type: 'generation_interrupted',
+        stage: marker?.stage ?? 'unknown',
+        startedAt: marker?.startedAt,
+        chatId,
+      });
+
+      try {
+        await this.bot.api.sendMessage(
+          chatId,
+          this.localesService.t('errors.generation_interrupted', {
+            stage: stageLabel,
+          }),
+          {
+            reply_markup: new InlineKeyboard().text(
+              this.localesService.t('menu.restart'),
+              this.constantsService.get<string>('callbacks.restart_process') ??
+                'restart_process',
+            ),
+          },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to notify chat ${chatId} about interrupted generation: ${error}`,
+        );
+      }
+    }
+  }
+
   private getUserLogContext(ctx: Context) {
     return {
-      telegramId: ctx.from?.id,
+      messengerId: ctx.from?.id,
       username: ctx.from?.username,
       firstName: ctx.from?.first_name,
       lastName: ctx.from?.last_name,
@@ -719,6 +842,20 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       firstName: ctx.from?.first_name,
       lastName: ctx.from?.last_name,
     };
+  }
+
+  /**
+   * Сообщает пользователю причину, а не только факт отказа. Исчерпанный баланс
+   * Bothub выглядел как обычный сбой, из-за чего редактор впустую перезапускал
+   * генерацию и не понимал, что на счёте кончились деньги.
+   */
+  private async replyGenerationError(ctx: Context, error: unknown) {
+    if (error instanceof BothubGenerationError && error.isBalanceExhausted) {
+      await ctx.reply(this.localesService.t('errors.balance_exhausted'));
+      return;
+    }
+
+    await ctx.reply(this.localesService.t('errors.generation_failed'));
   }
 
   private async logGenerationError(
@@ -816,22 +953,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleStart(ctx: Context, messageText?: string) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) {
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) {
       return;
     }
 
     const profile = this.getUserProfile(ctx);
-    let user = await this.usersService.findByTelegramId(telegramId);
+    const { user, isNew } = await this.usersService.registerFromMessenger(
+      messengerId,
+      profile,
+    );
 
     // Scenario 1: User not registered (first time)
-    if (!user) {
-      user = await this.usersService.createInactive(telegramId, profile);
+    if (isNew && !user.isActive) {
       await ctx.reply(this.localesService.t('account_pending'));
       return;
     }
-
-    await this.usersService.updateProfile(telegramId, profile);
 
     // Scenario 2: User registered but not active
     if (!user.isActive) {
@@ -944,8 +1081,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleScenarioSelected(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
 
     const callbackData = ctx.callbackQuery?.data;
     const scenarioPrefix =
@@ -957,7 +1094,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     const scenarioId = callbackData.replace(scenarioPrefix, '');
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -981,10 +1118,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   // Scenario 6: User works with article
   private async handleWorkWithArticle(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
 
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     // Reset any state when returning to menu
@@ -1234,14 +1371,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   private async handleCreateArticle(ctx: Context) {
     this.logger.log('Handling create article');
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) {
-      this.logger.warn('No telegramId in create article context');
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) {
+      this.logger.warn('No messengerId in create article context');
       return;
     }
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) {
-      this.logger.warn(`User not found for telegramId: ${telegramId}`);
+      this.logger.warn(`User not found for messengerId: ${messengerId}`);
       return;
     }
 
@@ -1256,16 +1393,27 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleMessage(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId || !ctx.message?.text) return;
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId || !ctx.message?.text) return;
 
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
+    if (!user) {
+      // В Яндекс Мессенджере нет кнопки «Start»: первое сообщение
+      // регистрирует пользователя и показывает статус доступа
+      await this.handleStart(ctx);
+      return;
+    }
 
     const state = await this.getUserState(user.id);
     const text = ctx.message.text.trim();
     if (this.isCancelCommand(text)) {
       await this.handleCancel(ctx);
+      return;
+    }
+
+    if (!state) {
+      // Вне сценария любой текст — просьба показать меню
+      await this.handleStart(ctx);
       return;
     }
 
@@ -1392,10 +1540,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        const result = await this.bothubService.processUserPrompt(
-          articleAddition?.content || 'Mock Content',
-          userPrompt,
-          this.getUserLogContext(ctx),
+        const result = await this.withGenerationGuard(
+          ctx,
+          'user_prompt_generation',
+          () =>
+            this.bothubService.processUserPrompt(
+              articleAddition?.content || 'Mock Content',
+              userPrompt,
+              this.getUserLogContext(ctx),
+            ),
         );
 
         await this.sendGenerationResult(ctx, result, 'user_prompt_article');
@@ -1434,16 +1587,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       } catch (error) {
         await this.logGenerationError(ctx, 'user_prompt_generation', error);
         this.logger.error(error);
-        await ctx.reply(this.localesService.t('errors.generation_failed'));
+        await this.replyGenerationError(ctx, error);
       }
       return;
     }
   }
 
   private async handleCancel(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1510,9 +1663,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleConfirmTitle(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1566,9 +1719,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleGenerateQuestionsChoice(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1584,15 +1737,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const { title, articleId } = context;
 
     await ctx.answerCallbackQuery();
+
     await ctx.reply(
       this.localesService.t('article.generating_questions') ||
         'Генерирую вопросы, подождите...',
     );
 
     try {
-      const questionsResult = await this.bothubService.generateQuestions(
-        title,
-        this.getUserLogContext(ctx),
+      const questionsResult = await this.withGenerationGuard(
+        ctx,
+        'generate_questions',
+        () =>
+          this.bothubService.generateQuestions(
+            title,
+            this.getUserLogContext(ctx),
+          ),
       );
 
       await this.logGenerationResultEvent(
@@ -1638,14 +1797,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'generate_questions', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleUploadQuestionsChoice(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1689,9 +1848,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleConfirmQuestions(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1715,9 +1874,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleEditQuestions(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1778,9 +1937,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleAuthorSelected(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1811,9 +1970,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     await ctx.answerCallbackQuery();
 
     let authorName = '';
+    // code нужен наравне с именем: по нему грузится описание стиля из Outline
+    let authorCode = code;
     if (code === 'keep') {
       const article = await this.articlesService.findById(articleId);
       authorName = article?.authorName ?? '';
+      // при «оставить текущего» приходит keep — восстанавливаем code по имени
+      authorCode =
+        BotService.AUTHOR_OPTIONS.find((item) => item.name === authorName)
+          ?.code ?? 'none';
     } else {
       authorName = option?.name ?? '';
       try {
@@ -1846,13 +2011,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         articleId,
         title: context.title,
         questions: context.questions,
-        context: { ...context, authorName },
+        context: { ...context, authorName, authorCode },
       });
       return;
     }
 
     // SEO-сценарий: автор выбран, дальше запрашиваем ТЗ
-    await this.setUserContext(user.id, { ...context, authorName });
+    await this.setUserContext(user.id, { ...context, authorName, authorCode });
     await this.setUserState(user.id, 'WAITING_FOR_SEO_TZ_FILE');
     await ctx.reply(
       this.localesService.t('article.seo_tz_request') ||
@@ -1884,11 +2049,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const articleResult = await this.bothubService.generateArticle(
-        title,
-        questions,
-        context.authorName ?? null,
-        this.getUserLogContext(ctx),
+      const articleResult = await this.withGenerationGuard(
+        ctx,
+        'generate_article',
+        () =>
+          this.bothubService.generateArticle(
+            title,
+            questions,
+            context.authorName ?? null,
+            context.authorCode ?? null,
+            this.getUserLogContext(ctx),
+          ),
       );
 
       await this.logGenerationResultEvent(
@@ -1927,14 +2098,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'generate_article', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleConfirmArticle(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -1968,9 +2139,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleFactCheckGeneration(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -1993,10 +2164,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const result = await this.bothubService.generateFactCheck(
-        article?.title || 'Unknown Title',
-        articleAddition?.content || 'Mock Content',
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'generate_fact_check',
+        () =>
+          this.bothubService.generateFactCheck(
+            article?.title || 'Unknown Title',
+            articleAddition?.content || 'Mock Content',
+            this.getUserLogContext(ctx),
+          ),
       );
 
       await this.logGenerationResultEvent(
@@ -2026,14 +2202,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'generate_fact_check', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleEditFactCheck(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -2050,9 +2226,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleFactCheckRewrite(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2087,12 +2263,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const result = await this.bothubService.rewriteArticle(
-        article?.title || 'Mock Title',
-        articleAddition?.content || 'Mock Content',
-        factCheckAddition?.content || 'Mock Fact Check',
-        article?.authorName ?? null,
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'rewrite_article',
+        () =>
+          this.bothubService.rewriteArticle(
+            article?.title || 'Mock Title',
+            articleAddition?.content || 'Mock Content',
+            factCheckAddition?.content || 'Mock Fact Check',
+            article?.authorName ?? null,
+            this.getUserLogContext(ctx),
+          ),
       );
 
       if (article) {
@@ -2129,14 +2310,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'rewrite_article', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleConfirmFactCheck(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -2179,9 +2360,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleDocument(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
     const document = ctx.message?.document;
     if (!document) return;
@@ -2410,11 +2591,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      const result = await this.bothubService.seoRewriteArticle(
-        articleAddition?.content || 'Mock Article Content',
-        text,
-        article?.authorName ?? null,
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'seo_rewrite_article',
+        () =>
+          this.bothubService.seoRewriteArticle(
+            articleAddition?.content || 'Mock Article Content',
+            text,
+            article?.authorName ?? null,
+            this.getUserLogContext(ctx),
+          ),
       );
 
       if (article && articleAddition) {
@@ -2453,7 +2639,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'seo_rewrite_article', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
@@ -2471,25 +2657,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async downloadDocumentBuffer(fileId: string): Promise<Buffer | null> {
-    if (!this.botToken) return null;
-    const file = await this.bot.api.getFile(fileId);
-    if (!file.file_path) return null;
-    const url = buildTelegramFileUrl(
-      this.telegramApiBaseUrl,
-      this.botToken,
-      file.file_path,
-    );
-    const response = await axios.get<ArrayBuffer>(url, {
-      responseType: 'arraybuffer',
-      ...(this.telegramProxyAgent
-        ? {
-            httpAgent: this.telegramProxyAgent,
-            httpsAgent: this.telegramProxyAgent,
-            proxy: false,
-          }
-        : {}),
-    });
-    return Buffer.from(response.data);
+    return this.messengerApi.getFile(fileId);
   }
 
   private startPolling() {
@@ -2500,26 +2668,24 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     this.pollingStarted = true;
     void (async () => {
       try {
-        await this.bot.api.deleteWebhook({ drop_pending_updates: false });
-        this.logger.log('Telegram webhook removed, starting long polling');
+        // Пока задан webhook_url, getUpdates ничего не возвращает
+        await this.messengerApi.setWebhook(null);
+        this.logger.log('Yandex Messenger webhook removed, starting polling');
 
-        await this.bot.start({
-          allowed_updates: ['message', 'callback_query'],
-          onStart: (botInfo) => {
-            this.logger.log(`Telegram bot started as ${botInfo.username}`);
-          },
+        await this.bot.start((botInfo) => {
+          this.logger.log(`Yandex Messenger bot started as ${botInfo.login}`);
         });
       } catch (error) {
         this.pollingStarted = false;
-        this.logger.error(`Failed to start Telegram bot: ${error}`);
+        this.logger.error(`Failed to start Yandex Messenger bot: ${error}`);
       }
     })();
   }
 
   private async handleConfirmRewrite(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -2561,9 +2727,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleArticleUniqueness(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2599,10 +2765,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       // SEO-метаданные и блоки иллюстраций в LLM не отправляем: вместо картинок
       // подставляем маркеры {{IMAGE_N}} и восстанавливаем блоки после ответа
       const { body, metadata } = extractArticleBodyWithMarkers(rawContent);
-      const result = await this.bothubService.makeArticleUnique(
-        body,
-        article?.authorName ?? null,
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'article_uniqueness',
+        () =>
+          this.bothubService.makeArticleUnique(
+            body,
+            article?.authorName ?? null,
+            this.getUserLogContext(ctx),
+          ),
       );
 
       const missingMarkers = findMissingImageMarkers(result.content, metadata);
@@ -2653,14 +2824,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'article_uniqueness', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleConfirmArticleUniqueness(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -2705,9 +2876,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleCancelArticleUniqueness(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     await ctx.answerCallbackQuery();
@@ -2723,9 +2894,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleUploadArticle(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2749,9 +2920,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleSeoOptimization(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2798,9 +2969,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleCheckUniqueness(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2869,14 +3040,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'text_ru_create_check', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleUserPrompt(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -2911,9 +3082,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleConfirmUserPrompt(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
@@ -2958,9 +3129,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleCancelUserPrompt(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     await ctx.answerCallbackQuery();
@@ -2976,9 +3147,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleRubrics(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -3009,10 +3180,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const result = await this.bothubService.generateRubrics(
-        article?.title || 'Unknown Title',
-        articleAddition?.content || 'Mock Content for Rubrics',
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'generate_rubrics',
+        () =>
+          this.bothubService.generateRubrics(
+            article?.title || 'Unknown Title',
+            articleAddition?.content || 'Mock Content for Rubrics',
+            this.getUserLogContext(ctx),
+          ),
       );
 
       await this.logGenerationResultEvent(
@@ -3043,14 +3219,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'generate_rubrics', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
 
   private async handleProducts(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -3081,9 +3257,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const result = await this.bothubService.generateProducts(
-        articleAddition?.content || 'Mock Content for Products',
-        this.getUserLogContext(ctx),
+      const result = await this.withGenerationGuard(
+        ctx,
+        'generate_products',
+        () =>
+          this.bothubService.generateProducts(
+            articleAddition?.content || 'Mock Content for Products',
+            this.getUserLogContext(ctx),
+          ),
       );
 
       await this.logGenerationResultEvent(
@@ -3112,13 +3293,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       await this.logGenerationError(ctx, 'generate_products', error);
       this.logger.error(error);
-      await ctx.reply(this.localesService.t('errors.generation_failed'));
+      await this.replyGenerationError(ctx, error);
     }
   }
   private async handleDownloadMenu(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -3202,9 +3383,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleDownloadItem(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -3265,9 +3446,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleAttachBitrixId(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     await this.setUserState(user.id, 'WAITING_FOR_BITRIX_ID');
@@ -3276,9 +3457,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleCreateBitrixTask(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const session = await this.sessionsService.findActive(user.id);
@@ -3493,9 +3674,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const article = await this.articlesService.findById(articleId);
     if (!article) return;
     const user = await this.usersService.findById(article.userId);
-    if (!user?.telegramId) return;
+    if (!user?.messengerId) return;
     await this.bot.api.sendMessage(
-      Number(user.telegramId),
+      user.messengerId,
       this.localesService.t('article.uniqueness_check_finished', { percent }) ||
         `Результат проверки готов. Уникальность текста: ${percent}%`,
     );
@@ -3505,18 +3686,18 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const article = await this.articlesService.findById(articleId);
     if (!article) return;
     const user = await this.usersService.findById(article.userId);
-    if (!user?.telegramId) return;
+    if (!user?.messengerId) return;
     await this.bot.api.sendMessage(
-      Number(user.telegramId),
+      user.messengerId,
       this.localesService.t('article.uniqueness_check_error') ||
         'Возникла техническая ошибка в процессе проверки уникальности, обратитесь к администратору системы за подробностями.',
     );
   }
 
   private async handleRegenerate(ctx: Context) {
-    const telegramId = ctx.from?.id?.toString();
-    if (!telegramId) return;
-    const user = await this.usersService.findByTelegramId(telegramId);
+    const messengerId = ctx.from?.id?.toString();
+    if (!messengerId) return;
+    const user = await this.usersService.findByMessengerId(messengerId);
     if (!user) return;
 
     const state = await this.getUserState(user.id);
