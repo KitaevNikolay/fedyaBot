@@ -168,7 +168,13 @@ export class MessengerContext {
 
     void send();
     const timer = setInterval(() => void send(), refreshMs);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      // Отменить индикатор нельзя, но можно сократить остаток до секунды
+      void this.api
+        .sendTyping(this.target, { type: 'text', timeout: 1 })
+        .catch(() => undefined);
+    };
   }
 
   /**

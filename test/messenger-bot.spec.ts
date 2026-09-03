@@ -135,7 +135,7 @@ async function main() {
     type: 'set_elements_state',
     ids: ['select_scenario'],
     state: 'loading',
-    timeout_seconds: 10,
+    timeout_seconds: 2,
   });
   assert.deepEqual(callbackButton.directives[1], {
     type: 'server_action',
@@ -221,12 +221,14 @@ async function main() {
   const typing = sent
     .slice(beforeTyping)
     .filter((item) => item.kind === 'typing');
-  assert.ok(typing.length >= 2, 'processing indicator must be refreshed');
+  assert.ok(typing.length >= 3, 'processing indicator must be refreshed');
   assert.deepEqual(typing[0].payload, {
     type: 'processing',
     timeout: 60,
     processing_content: { display: 'text', text: 'генерация статьи' },
   });
+  // Завершение шага сокращает индикатор до секунды
+  assert.deepEqual(typing.at(-1)!.payload, { type: 'text', timeout: 1 });
 
   // 10. Разбиение текста по переносам
   const parts = MessengerContext.splitText(
