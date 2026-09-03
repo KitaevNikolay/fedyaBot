@@ -42,6 +42,9 @@ function createFakeApi() {
     getSelf: async () => ({ ok: true, id: 'bot', login: 'fedya-bot' }),
     setWebhook: async () => ({ ok: true, id: 'bot', login: 'fedya-bot' }),
     getUpdates: async () => [],
+    sendTyping: async (target: unknown, options: unknown) => {
+      sent.push({ kind: 'typing', target, payload: options });
+    },
   };
   return { api: api as unknown as YandexMessengerApiService, sent };
 }
@@ -127,7 +130,14 @@ async function main() {
     Array<{ title: string; directives: Array<Record<string, unknown>> }>
   >;
   assert.equal(urlButton.directives[0].type, 'open_uri');
+  // Сначала крутилка на кнопке, потом серверное действие
   assert.deepEqual(callbackButton.directives[0], {
+    type: 'set_elements_state',
+    ids: ['select_scenario'],
+    state: 'loading',
+    timeout_seconds: 10,
+  });
+  assert.deepEqual(callbackButton.directives[1], {
     type: 'server_action',
     name: 'callback',
     payload: { data: 'select_scenario' },
@@ -200,7 +210,25 @@ async function main() {
   await bot.handleUpdate(privateUpdate(9, { text: '/boom' }));
   assert.equal(log.at(-1), 'error:Error: boom');
 
-  // 9. Разбиение текста по переносам
+  // 9. Индикатор обработки: приватный чат — processing с текстом, продление по таймеру
+  bot.command('long', async (ctx) => {
+    const stop = ctx.startProcessing('генерация статьи', 5);
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    stop();
+  });
+  const beforeTyping = sent.length;
+  await bot.handleUpdate(privateUpdate(10, { text: '/long' }));
+  const typing = sent
+    .slice(beforeTyping)
+    .filter((item) => item.kind === 'typing');
+  assert.ok(typing.length >= 2, 'processing indicator must be refreshed');
+  assert.deepEqual(typing[0].payload, {
+    type: 'processing',
+    timeout: 60,
+    processing_content: { display: 'text', text: 'генерация статьи' },
+  });
+
+  // 10. Разбиение текста по переносам
   const parts = MessengerContext.splitText(
     `${'a'.repeat(5990)}\n${'b'.repeat(20)}`,
   );

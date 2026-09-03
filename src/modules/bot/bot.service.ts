@@ -710,10 +710,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     stages.push(stage);
     this.generationStages.set(chatId, stages);
     await this.writeGenerationMarker(chatId, stage);
+    // Индикатор обработки в чате на всё время шага
+    const stopProcessing = ctx.startProcessing(
+      BotService.GENERATION_STAGE_LABELS[stage] ?? 'генерация',
+    );
 
     try {
       return await run();
     } finally {
+      stopProcessing();
       stages.pop();
       const outerStage = stages[stages.length - 1];
 

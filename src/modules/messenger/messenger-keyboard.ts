@@ -11,6 +11,13 @@ export const CALLBACK_ACTION_NAME = 'callback';
 const BUTTON_TEXT_MAX_LENGTH = 255;
 
 /**
+ * Сколько секунд кнопка крутится после нажатия. Клиент снимает состояние сам:
+ * ответ бота на обычные кнопки приходит за секунды, а долгие шаги сразу
+ * шлют «Генерирую…» и индикатор обработки.
+ */
+const BUTTON_LOADING_SECONDS = 10;
+
+/**
  * Построитель клавиатуры под сообщением. Интерфейс повторяет привычный
  * InlineKeyboard: text()/url()/row(), а на выходе — suggest_buttons Яндекса.
  * Кнопки с callback-данными используют директиву server_action: нажатие не
@@ -20,10 +27,18 @@ export class InlineKeyboard {
   private readonly rows: YandexSuggestButton[][] = [[]];
 
   text(label: string, callbackData: string): this {
+    const id = InlineKeyboard.truncate(callbackData);
     this.currentRow().push({
-      id: InlineKeyboard.truncate(callbackData),
+      id,
       title: InlineKeyboard.truncate(label),
       directives: [
+        // Сначала визуальный отклик на клиенте, затем запрос к боту
+        {
+          type: 'set_elements_state',
+          ids: [id],
+          state: 'loading',
+          timeout_seconds: BUTTON_LOADING_SECONDS,
+        },
         {
           type: 'server_action',
           name: CALLBACK_ACTION_NAME,

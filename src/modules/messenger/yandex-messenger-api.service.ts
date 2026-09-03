@@ -8,6 +8,7 @@ import {
   YandexSendFileOptions,
   YandexSendResult,
   YandexSendTextOptions,
+  YandexTypingOptions,
   YandexUpdate,
   YandexUpdatesResponse,
 } from './yandex-messenger.types';
@@ -127,9 +128,13 @@ export class YandexMessengerApiService {
     }
   }
 
-  async sendTyping(target: YandexChatTarget): Promise<void> {
+  async sendTyping(
+    target: YandexChatTarget,
+    options: YandexTypingOptions = {},
+  ): Promise<void> {
     await this.request('POST', '/messages/sendTyping/', {
       ...this.targetFields(target),
+      ...options,
     });
   }
 

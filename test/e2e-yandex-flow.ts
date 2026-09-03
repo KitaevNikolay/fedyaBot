@@ -45,7 +45,8 @@ type Sent = SentText | SentFile;
 
 const sent: Sent[] = [];
 let fileToServe: Buffer = Buffer.alloc(0);
-let updateCounter = 1000;
+// Уникально между запусками: замок дедупликации update_id живёт в Redis 60 секунд
+let updateCounter = Date.now() % 1_000_000_000;
 
 function buttonsOf(suggest?: YandexSuggestButtons): string[] {
   const rows = (suggest?.buttons ?? []) as Array<
@@ -66,7 +67,10 @@ function buttonsOf(suggest?: YandexSuggestButtons): string[] {
   >;
   const flat = rows.flatMap((row) => (Array.isArray(row) ? row : [row]));
   return flat.map((button) => {
-    const directive = button.directives?.[0];
+    // Первой идёт директива крутилки (set_elements_state), ищем действие
+    const directive = button.directives?.find(
+      (item) => item.type === 'server_action' || item.type === 'open_uri',
+    );
     if (!directive) return '';
     return directive.type === 'server_action'
       ? (directive.payload?.data ?? '')

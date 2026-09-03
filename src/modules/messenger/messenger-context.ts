@@ -143,6 +143,35 @@ export class MessengerContext {
   }
 
   /**
+   * Показывает в чате индикатор обработки («Генерирую статью…») и продлевает
+   * его, пока не вызван возвращённый stop(). В групповых чатах processing
+   * недоступен — там показывается обычное «печатает…».
+   */
+  startProcessing(text: string, refreshMs = 50_000): () => void {
+    const isPrivate = this.update.chat.type === 'private';
+    const send = () =>
+      this.api
+        .sendTyping(
+          this.target,
+          isPrivate
+            ? {
+                type: 'processing',
+                timeout: 60,
+                processing_content: {
+                  display: 'text',
+                  text: text.slice(0, 100),
+                },
+              }
+            : { type: 'text', timeout: 60 },
+        )
+        .catch(() => undefined);
+
+    void send();
+    const timer = setInterval(() => void send(), refreshMs);
+    return () => clearInterval(timer);
+  }
+
+  /**
    * В Яндексе нажатие server_action-кнопки не требует подтверждения.
    * Текст (в Telegram — всплывающее уведомление) отправляем сообщением.
    */

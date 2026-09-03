@@ -120,6 +120,14 @@ export interface YandexSendFileOptions {
   suggest_buttons?: YandexSuggestButtons;
 }
 
+/** Индикатор в чате: «печатает…» или строка обработки (processing — только приватные чаты) */
+export interface YandexTypingOptions {
+  type?: 'text' | 'processing';
+  /** 1–60 секунд, по умолчанию 3 */
+  timeout?: number;
+  processing_content?: { display: 'text' | 'default'; text?: string };
+}
+
 export interface YandexSendResult {
   ok: boolean;
   message_id: number;
