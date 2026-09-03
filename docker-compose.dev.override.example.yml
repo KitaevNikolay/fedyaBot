@@ -1,0 +1,19 @@
+# Пример override для dev-стека, когда стандартные порты заняты.
+# Использование:
+#   docker compose -p fedyabot -f docker-compose.dev.yml -f docker-compose.dev.override.example.yml up -d --build
+services:
+  db:
+    ports: !override
+      - "3308:3306"
+  redis:
+    ports: !override
+      - "6380:6379"
+  app:
+    ports: !override
+      - "3020:3000"
+  cabinet-api:
+    ports: !override
+      - "3011:3001"
+  cabinet-frontend:
+    ports: !override
+      - "5174:80"
