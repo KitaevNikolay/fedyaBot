@@ -9,6 +9,7 @@ import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
 import type { BothubModelOption, GenerationResult } from './bothub.types';
 
 export type { GenerationResult } from './bothub.types';
+export { BothubGenerationError } from './bothub.types';
 
 @Injectable()
 export class BothubService {
@@ -35,14 +36,25 @@ export class BothubService {
   async generateArticle(
     articleSubject: string,
     questionsContent: string,
+    authorName?: string | null,
+    authorCode?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
+    // Описание стиля живёт в отдельной коллекции Outline и подтягивается
+    // по выбору пользователя — в системном промпте остались только правила
+    const authorStyle = await this.generationResolver.getAuthorStyle(
+      authorCode,
+      userContext,
+    );
+
     return this.runStage(
       'generate_article',
       {
         article_subject: articleSubject,
         'QUESTION.content': questionsContent,
         today: this.getToday(),
+        author_name: authorName ?? '',
+        author_style: authorStyle,
       },
       userContext,
     );
@@ -69,6 +81,7 @@ export class BothubService {
     articleSubject: string,
     articleContent: string,
     factCheckContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
@@ -77,6 +90,7 @@ export class BothubService {
         article_subject: articleSubject,
         'ARTICLE.content': articleContent,
         'FACT_CHECK.content': factCheckContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -85,6 +99,7 @@ export class BothubService {
   async seoRewriteArticle(
     articleContent: string,
     seoTzContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
@@ -92,6 +107,7 @@ export class BothubService {
       {
         'SEO_TZ.content': seoTzContent,
         'ARTICLE.content': articleContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -127,12 +143,14 @@ export class BothubService {
 
   async makeArticleUnique(
     articleContent: string,
+    authorName?: string | null,
     userContext?: Record<string, unknown>,
   ): Promise<GenerationResult> {
     return this.runStage(
       'article_uniqueness',
       {
         'ARTICLE.content': articleContent,
+        author_name: authorName ?? '',
       },
       userContext,
     );
@@ -178,15 +196,21 @@ export class BothubService {
       userContext,
     );
     const prompt = applyPromptTemplate(type, prompts.user, values);
+    // Системный промпт тоже шаблонизируем: в нём живут {{ author_name }} и
+    // {{ author_style }}, а раньше подстановка шла только в пользовательский —
+    // и токены уезжали в модель literal'ом
+    const systemPrompt = prompts.system
+      ? applyPromptTemplate(type, prompts.system, values)
+      : prompts.system;
 
     if (this.runtimeConfig.isMockMode()) {
-      return this.createMockResult(type, prompts.system, prompt);
+      return this.createMockResult(type, systemPrompt, prompt);
     }
 
     return this.apiClient.sendGenerationRequest(
       prompt,
       settings,
-      prompts.system,
+      systemPrompt,
       userContext,
     );
   }

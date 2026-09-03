@@ -1,0 +1,1 @@
+ALTER TABLE `Article` ADD COLUMN `authorName` VARCHAR(191) NULL;

@@ -23,8 +23,8 @@
 | Поле | Тип | Описание |
 | --- | --- | --- |
 | id | String (UUID) | Первичный ключ |
-| telegramId | String (Unique) | Telegram ID пользователя |
-| username | String? | Telegram username |
+| messengerId | String (Unique) | Логин пользователя в Яндекс Мессенджере (у записей до миграции 2026-09 — прежний Telegram ID) |
+| username | String? | Логин (дублирует messengerId для новых пользователей) |
 | firstName | String? | Имя |
 | lastName | String? | Фамилия |
 | isActive | Boolean | Флаг активированного пользователя |
@@ -40,6 +40,7 @@
 | id | String (UUID) | Первичный ключ |
 | userId | String | ID пользователя |
 | title | String (Text) | Заголовок статьи |
+| authorName | String? | Выбранный авторский стиль (тон-оф-войс), пусто = без стиля |
 | createdAt | DateTime | Дата создания |
 | updatedAt | DateTime | Дата обновления |
 

@@ -25,7 +25,7 @@ export class AdminAnalyticsService {
         orderBy: { createdAt: 'desc' },
         select: {
           id: true,
-          telegramId: true,
+          messengerId: true,
           firstName: true,
           lastName: true,
           username: true,
@@ -94,7 +94,7 @@ export class AdminAnalyticsService {
       where: { id: userId },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -275,7 +275,7 @@ export class AdminAnalyticsService {
           orderBy: { createdAt: 'desc' },
           select: {
             id: true,
-            telegramId: true,
+            messengerId: true,
             firstName: true,
             lastName: true,
             username: true,
@@ -377,7 +377,7 @@ export class AdminAnalyticsService {
       where: { id: userId },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -466,7 +466,7 @@ export class AdminAnalyticsService {
       where: { id: userId },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -681,7 +681,7 @@ export class AdminAnalyticsService {
             username: true,
             firstName: true,
             lastName: true,
-            telegramId: true,
+            messengerId: true,
           },
         })
       : [];
@@ -696,7 +696,7 @@ export class AdminAnalyticsService {
       users.map(user => [
         user.id,
         [user.firstName, user.lastName].filter(Boolean).join(' ').trim() ||
-          (user.username ? `@${user.username}` : user.telegramId),
+          (user.username ? `@${user.username}` : user.messengerId),
       ]),
     );
     const stageLabelMap = new Map(

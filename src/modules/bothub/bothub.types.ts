@@ -39,8 +39,12 @@ export interface GenerationResult {
 
 export interface BothubResponse {
   choices?: Array<{
+    /** stop — ответ завершён, length — упёрлись в лимит токенов */
+    finish_reason?: string;
     message?: {
       content?: string;
+      /** Рассуждения reasoning-моделей: расходуют тот же лимит токенов */
+      reasoning?: string;
     };
   }>;
   usage?: {
@@ -50,12 +54,53 @@ export interface BothubResponse {
   };
 }
 
+/**
+ * Ошибка генерации со стороны Bothub. Отдельный тип нужен, чтобы бот отличал
+ * «кончились деньги» от прочих сбоев: раньше пользователь на любой отказ видел
+ * «Попробуйте позже» и не мог понять, что счёт ушёл в минус.
+ */
+export class BothubGenerationError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = 'BothubGenerationError';
+  }
+
+  get isBalanceExhausted() {
+    return this.code === 'NOT_ENOUGH_TOKENS' || this.status === 403;
+  }
+}
+
+/**
+ * Поток генерации закончился, не прислав finish_reason. Ответ неполный, но и
+ * не доставлен — повторять безопасно: платить дважды за выданный результат
+ * здесь не за что.
+ */
+export class BothubStreamAbortedError extends Error {
+  constructor(
+    readonly contentLength: number,
+    readonly reasoningLength: number,
+  ) {
+    super(
+      `Ответ модели оборван: поток закончился без finish_reason ` +
+        `(текста ${contentLength} символов, рассуждений ${reasoningLength})`,
+    );
+    this.name = 'BothubStreamAbortedError';
+  }
+}
+
 export interface BothubBalanceResponse {
   subscription?: {
     plan?: {
       type?: string;
     };
+    // Bothub переименовал поле из snake_case в camelCase: читаем оба, иначе
+    // баланс молча превращается в 0 и утечка счёта остаётся незамеченной
     availableBalance?: number;
+    available_balance?: number;
   };
   error?: {
     message?: string;

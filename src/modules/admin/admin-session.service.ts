@@ -9,7 +9,7 @@ import { PrismaService } from '../../database/prisma.service';
 
 type AdminSessionPayload = {
   sub: string;
-  telegramId: string;
+  messengerId: string;
   role: string;
   exp: number;
 };
@@ -26,7 +26,7 @@ export class AdminSessionService {
       where: { id: userId },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         role: true,
       },
     });
@@ -37,7 +37,7 @@ export class AdminSessionService {
 
     const payload: AdminSessionPayload = {
       sub: user.id,
-      telegramId: user.telegramId,
+      messengerId: user.messengerId,
       role: user.role,
       exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
     };
@@ -52,7 +52,7 @@ export class AdminSessionService {
       where: { id: payload.sub },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -136,11 +136,11 @@ export class AdminSessionService {
   private getSecret() {
     const secret =
       this.configService.get<string>('CABINET_AUTH_SECRET') ??
-      this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+      this.configService.get<string>('YANDEX_BOT_TOKEN');
 
     if (!secret) {
       throw new InternalServerErrorException(
-        'CABINET_AUTH_SECRET or TELEGRAM_BOT_TOKEN must be configured',
+        'CABINET_AUTH_SECRET or YANDEX_BOT_TOKEN must be configured',
       );
     }
 

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigAppModule } from '../../config/config.module';
 import { ArticlesModule } from '../articles/articles.module';
 import { BothubModule } from '../bothub/bothub.module';
+import { MessengerModule } from '../messenger/messenger.module';
 import { RedisModule } from '../redis/redis.module';
 import { ScenariosModule } from '../scenarios/scenarios.module';
 import { SessionsModule } from '../sessions/sessions.module';
@@ -19,6 +20,7 @@ import { BotService } from './bot.service';
     ScenariosModule,
     ArticlesModule,
     BothubModule,
+    MessengerModule,
     RedisModule,
     TechnicalArticleAdditionsModule,
     TextRuModule,

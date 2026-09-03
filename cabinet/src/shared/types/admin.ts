@@ -5,7 +5,7 @@ export interface DashboardStats {
 
 export interface AdminUser {
   id: string;
-  telegramId: string;
+  messengerId: string;
   firstName: string | null;
   lastName: string | null;
   username: string | null;
@@ -216,17 +216,12 @@ export interface GenerationSettingsUpdatePayload {
   additionalPayload: Record<string, unknown> | null;
 }
 
-export interface TelegramAuthPayload {
-  id: string | number;
-  first_name: string;
-  last_name?: string;
-  username?: string;
-  photo_url?: string;
-  auth_date: string | number;
-  hash: string;
+export interface RequestAuthCodeResponse {
+  ok: boolean;
+  expiresInSeconds: number;
 }
 
-export interface TelegramAuthResponse {
+export interface MessengerAuthResponse {
   status: 'approved' | 'pending' | 'forbidden';
   user: AdminUser | null;
   accessToken: string | null;

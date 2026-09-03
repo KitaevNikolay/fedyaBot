@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { ArticleAdditionType, TechnicalArticleAdditionState } from '@prisma/client';
+import {
+  ArticleAdditionType,
+  TechnicalArticleAdditionState,
+} from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { CompetitorsService } from '../competitors/competitors.service';
 
@@ -140,7 +143,7 @@ export class ArticlesService {
     });
 
     if (!check || !check.technicalInfo) return [];
-    return check.technicalInfo.split(', ').filter(s => s.length > 0);
+    return check.technicalInfo.split(', ').filter((s) => s.length > 0);
   }
 
   async updateVersion(id: string, content: string) {
@@ -154,6 +157,13 @@ export class ArticlesService {
     return this.prisma.article.update({
       where: { id },
       data: { title },
+    });
+  }
+
+  async updateAuthorName(id: string, authorName: string | null) {
+    return this.prisma.article.update({
+      where: { id },
+      data: { authorName },
     });
   }
 }

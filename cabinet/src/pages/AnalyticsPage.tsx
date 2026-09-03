@@ -151,7 +151,7 @@ export function AnalyticsPage() {
                 value: user.id,
                 label:
                   [user.firstName, user.lastName].filter(Boolean).join(' ').trim() ||
-                  (user.username ? `@${user.username}` : user.telegramId),
+                  (user.username ? `@${user.username}` : user.messengerId),
               }))}
               className="analytics-filter analytics-filter-users"
             />

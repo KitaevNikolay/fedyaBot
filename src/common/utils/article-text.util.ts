@@ -19,14 +19,18 @@ export function extractArticleBody(content: string): string {
 
   for (const line of lines) {
     const t = line.trim();
-    if (t.startsWith('**Title:**') || t.startsWith('**Description:**')) continue;
+    if (t.startsWith('**Title:**') || t.startsWith('**Description:**'))
+      continue;
     if (t.startsWith('[') && t.endsWith(']')) continue;
     if (t.startsWith('Alt:')) continue;
     if (t === '---') continue;
     result.push(line.replace(/\s*\(H[1-6]\)\s*$/, ''));
   }
 
-  return result.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return result
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /**
@@ -34,7 +38,9 @@ export function extractArticleBody(content: string): string {
  * for sending to LLM uniquification. Returns cleaned body + metadata
  * needed to restore the full article afterwards.
  */
-export function extractArticleBodyWithMarkers(content: string): ExtractedArticle {
+export function extractArticleBodyWithMarkers(
+  content: string,
+): ExtractedArticle {
   const lines = content.split('\n');
   const result: string[] = [];
   const metadata: ArticleMetadata = {
@@ -101,7 +107,10 @@ export function extractArticleBodyWithMarkers(content: string): ExtractedArticle
     result.push(pendingImageKey);
   }
 
-  const body = result.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const body = result
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
   return { body, metadata };
 }
 

@@ -38,7 +38,7 @@ function getDisplayName(user: AnalyticsUser | AnalyticsUserOverview['user']) {
     return `@${user.username}`;
   }
 
-  return `Telegram ${user.telegramId}`;
+  return `Логин ${user.messengerId}`;
 }
 
 export function UsersPage() {
@@ -209,7 +209,7 @@ export function UsersPage() {
       render: (_, user) => (
         <div className="user-cell">
           <Typography.Text strong>{getDisplayName(user)}</Typography.Text>
-          <Typography.Text type="secondary">{`Telegram ID: ${user.telegramId}`}</Typography.Text>
+          <Typography.Text type="secondary">{`Логин Яндекса: ${user.messengerId}`}</Typography.Text>
         </div>
       ),
     },
@@ -400,8 +400,8 @@ export function UsersPage() {
               <Descriptions.Item label="Пользователь">
                 {getDisplayName(overview.user)}
               </Descriptions.Item>
-              <Descriptions.Item label="Telegram ID">
-                {overview.user.telegramId}
+              <Descriptions.Item label="Логин Яндекса">
+                {overview.user.messengerId}
               </Descriptions.Item>
               <Descriptions.Item label="Последняя активность">
                 {overview.analytics.lastEventAt

@@ -1,23 +1,16 @@
-import {
-  Injectable,
-  InternalServerErrorException,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { createHash, createHmac, timingSafeEqual } from 'crypto';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { UsersService } from '../users/users.service';
+import { AdminAuthCodeService } from './admin-auth-code.service';
 import { AdminSessionService } from './admin-session.service';
-import { TelegramAuthDto } from './dto/telegram-auth.dto';
 
 @Injectable()
 export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
-    private readonly configService: ConfigService,
     private readonly adminSessionService: AdminSessionService,
+    private readonly adminAuthCodeService: AdminAuthCodeService,
   ) {}
 
   async getDashboard() {
@@ -37,7 +30,7 @@ export class AdminService {
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -47,7 +40,7 @@ export class AdminService {
       },
     });
 
-    return users.map(user => ({
+    return users.map((user) => ({
       ...user,
       status: user.isActive ? 'approved' : 'blocked',
     }));
@@ -59,7 +52,7 @@ export class AdminService {
       data: { isActive },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -90,7 +83,7 @@ export class AdminService {
       data: { role },
       select: {
         id: true,
-        telegramId: true,
+        messengerId: true,
         firstName: true,
         lastName: true,
         username: true,
@@ -106,79 +99,33 @@ export class AdminService {
     };
   }
 
-  async verifyTelegramAuth(payload: TelegramAuthDto) {
-    const botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+  /** Шаг 1: отправить одноразовый код в Яндекс Мессенджер */
+  async requestAuthCode(login: string) {
+    return this.adminAuthCodeService.requestCode(login);
+  }
 
-    if (!botToken) {
-      throw new InternalServerErrorException(
-        'TELEGRAM_BOT_TOKEN is not configured',
-      );
-    }
+  /** Шаг 2: проверить код, зарегистрировать пользователя и выдать сессию */
+  async verifyAuthCode(rawLogin: string, code: string) {
+    const login = this.adminAuthCodeService.verifyCode(rawLogin, code);
+    const { user } = await this.usersService.registerFromMessenger(login, {
+      username: login,
+    });
 
-    const dataCheckString = Object.entries(payload)
-      .filter(([key, value]) => key !== 'hash' && value !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n');
-
-    const secretKey = createHash('sha256').update(botToken).digest();
-    const expectedHash = createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
-    const actualBuffer = Buffer.from(payload.hash, 'hex');
-    const expectedBuffer = Buffer.from(expectedHash, 'hex');
-
-    if (
-      actualBuffer.length !== expectedBuffer.length ||
-      !timingSafeEqual(actualBuffer, expectedBuffer)
-    ) {
-      throw new UnauthorizedException('Invalid Telegram authorization payload');
-    }
-
-    const authDate = Number(payload.auth_date);
-    const nowInSeconds = Math.floor(Date.now() / 1000);
-    const maxAgeInSeconds = 60 * 60 * 24;
-
-    if (!Number.isFinite(authDate) || nowInSeconds - authDate > maxAgeInSeconds) {
-      throw new UnauthorizedException('Telegram authorization payload is expired');
-    }
-
-    const telegramId = payload.id;
-    const existingUser = await this.usersService.findByTelegramId(telegramId);
-
-    if (existingUser) {
-      await this.usersService.updateProfile(telegramId, {
-        firstName: payload.first_name,
-        lastName: payload.last_name,
-        username: payload.username,
-      });
-    } else {
-      await this.usersService.createInactive(telegramId, {
-        firstName: payload.first_name,
-        lastName: payload.last_name,
-        username: payload.username,
-      });
-    }
-
-    const user = await this.usersService.findByTelegramId(telegramId);
-    const status = user?.isActive
+    const status = user.isActive
       ? user.role === 'admin'
         ? 'approved'
         : 'forbidden'
       : 'pending';
     const accessToken =
-      user?.isActive && user.role === 'admin'
+      user.isActive && user.role === 'admin'
         ? await this.adminSessionService.createSessionToken(user.id)
         : null;
 
     return {
-      user: user
-        ? {
-            ...user,
-            status: user.isActive ? 'approved' : 'blocked',
-          }
-        : null,
+      user: {
+        ...user,
+        status: user.isActive ? 'approved' : 'blocked',
+      },
       status,
       accessToken,
     };

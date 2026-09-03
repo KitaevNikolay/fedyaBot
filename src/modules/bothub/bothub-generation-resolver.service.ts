@@ -1,4 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { GenerationSettingsService } from '../generation-settings/generation-settings.service';
 import { OutlineService } from '../outline/outline.service';
 import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
@@ -10,6 +12,14 @@ import {
 
 @Injectable()
 export class BothubGenerationResolverService {
+  private readonly logger = new Logger(BothubGenerationResolverService.name);
+  private readonly authorStylesPath = join(
+    process.cwd(),
+    'config',
+    'bothub',
+    'author_styles_map.json',
+  );
+
   constructor(
     private readonly runtimeConfig: BothubRuntimeConfigService,
     private readonly outlineService: OutlineService,
@@ -58,6 +68,50 @@ export class BothubGenerationResolverService {
     }
 
     return { system: systemPrompt, user: userPrompt };
+  }
+
+  /**
+   * Описание авторского стиля из коллекции «Федя бот стилистические промпты».
+   * Тексты стилей вынесены из системного промпта статьи, чтобы их правили
+   * отдельно от инструкций по генерации.
+   */
+  async getAuthorStyle(
+    authorCode?: string | null,
+    userContext?: Record<string, unknown>,
+  ): Promise<string> {
+    if (!authorCode || authorCode === 'none') {
+      return '';
+    }
+
+    const documentId = this.readAuthorStyleMap()[authorCode];
+    if (!documentId) {
+      this.logger.warn(`Стиль автора ${authorCode} не найден в карте стилей`);
+      return '';
+    }
+
+    const style = await this.outlineService.getPromptById(
+      documentId,
+      userContext,
+    );
+    if (!style) {
+      this.logger.warn(`Не удалось загрузить стиль автора ${authorCode}`);
+      return '';
+    }
+
+    return style.trim();
+  }
+
+  private readAuthorStyleMap(): Record<string, string> {
+    try {
+      const raw = readFileSync(this.authorStylesPath, 'utf-8');
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, string>)
+        : {};
+    } catch (error) {
+      this.logger.warn(`Карта стилей авторов недоступна: ${error}`);
+      return {};
+    }
   }
 
   private getFallbackSettings(type: string): GenerationSettingsPayload | null {

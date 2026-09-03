@@ -6,6 +6,7 @@ import { ArticlesModule } from './modules/articles/articles.module';
 import { BotModule } from './modules/bot/bot.module';
 import { BothubModule } from './modules/bothub/bothub.module';
 import { GenerationSettingsModule } from './modules/generation-settings/generation-settings.module';
+import { MessengerModule } from './modules/messenger/messenger.module';
 import { OutlineModule } from './modules/outline/outline.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { ScenariosModule } from './modules/scenarios/scenarios.module';
@@ -33,6 +34,7 @@ import { TextRuModule } from './modules/text-ru/text-ru.module';
     ScenariosModule,
     ArticlesModule,
     BothubModule,
+    MessengerModule,
     GenerationSettingsModule,
     OutlineModule,
     TechnicalArticleAdditionsModule,

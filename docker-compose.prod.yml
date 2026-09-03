@@ -50,8 +50,6 @@ services:
     build:
       context: .
       dockerfile: cabinet/Dockerfile
-      args:
-        VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-}
     image: fedyabot-cabinet-frontend:prod
     container_name: fedyabot-cabinet-frontend
     restart: unless-stopped
