@@ -30,6 +30,8 @@ COPY package*.json ./
 COPY prisma ./prisma
 COPY config ./config
 COPY docs ./docs
+# Служебные скрипты (привязка промптов Outline, импорт логов)
+COPY scripts ./scripts
 # Only production dependencies
 RUN npm install --omit=dev
 

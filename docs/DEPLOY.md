@@ -92,7 +92,23 @@ curl -s -X POST "$OUTLINE_API_URL/auth.info" -H "Authorization: Bearer $OUTLINE_
 Без рабочего ключа бот на каждой генерации получит ошибку «Ошибка генерации» — промпты не
 загрузятся (в mock-режиме есть fallback на `config/bothub/config.json`, на проде его нет).
 
-### 2.2. Перенести доработанные промпты
+### 2.2. Коллекция промптов и привязка к типам генерации
+
+Промпты текущей версии лежат в отдельной коллекции Outline. Кабинет показывает в выпадающих
+списках «Настроек генерации» документы коллекции из `OUTLINE_PROMPTS_COLLECTION` (имя или id;
+пусто — коллекция с именем `prompts`) плюс уже привязанные документы. Массово перепривязать
+типы генерации на документы другой коллекции можно скриптом (есть в образе `app`):
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm --no-deps app node scripts/outline-bind-prompts.js                     # коллекции
+docker compose -f docker-compose.prod.yml run --rm --no-deps app node scripts/outline-bind-prompts.js --collection "<имя>"  # план
+docker compose -f docker-compose.prod.yml run --rm --no-deps app node scripts/outline-bind-prompts.js --collection "<имя>" --apply
+```
+
+Скрипт сопоставляет документы по типу в скобках в заголовке («… (generate_article)») и слову
+«системный». Пошаговый чек-лист выкатки — [RELEASE_2.0_RUNBOOK.md](RELEASE_2.0_RUNBOOK.md).
+
+### 2.3. Перенести доработанные промпты
 
 Новые версии шести документов лежат в [newTask/prompts_new/](../newTask/prompts_new/),
 что именно изменено — в [CHANGES.md](../newTask/prompts_new/CHANGES.md). Перенос ручной:

@@ -216,13 +216,16 @@ export class OutlineService implements OnModuleInit {
     collectionId?: string,
     userContext?: Record<string, unknown>,
   ): Promise<OutlineDocument[]> {
+    // Без limit Outline отдаёт 25 документов — коллекция промптов больше
     const payload = collectionId
       ? {
           collectionId,
           sort: 'title',
+          limit: 100,
         }
       : {
           sort: 'title',
+          limit: 100,
         };
 
     return this.request<OutlineDocument[]>(
@@ -235,6 +238,23 @@ export class OutlineService implements OnModuleInit {
 
   getWorkspaceUrl() {
     return this.apiUrl.replace(/\/api$/, '');
+  }
+
+  /**
+   * Коллекция с промптами для списка в кабинете: имя или id из
+   * OUTLINE_PROMPTS_COLLECTION, иначе коллекция с именем «prompts».
+   */
+  private findPromptsCollection(collections: Collection[]) {
+    const configured = this.configService
+      .get<string>('OUTLINE_PROMPTS_COLLECTION')
+      ?.trim()
+      .toLowerCase();
+    const wanted = configured || 'prompts';
+    return collections.find(
+      (collection) =>
+        collection.id.toLowerCase() === wanted ||
+        collection.name.trim().toLowerCase() === wanted,
+    );
   }
 
   async getPromptDocumentSummary(
@@ -262,9 +282,7 @@ export class OutlineService implements OnModuleInit {
     if (this.apiKey) {
       try {
         const collections = await this.listCollections(userContext);
-        const promptsCollection = collections.find(
-          (collection) => collection.name === 'prompts',
-        );
+        const promptsCollection = this.findPromptsCollection(collections);
 
         if (promptsCollection) {
           const documents = await this.listDocuments(
@@ -416,7 +434,8 @@ export class OutlineService implements OnModuleInit {
       }
 
       return Object.values(parsed).filter(
-        (value): value is string => typeof value === 'string' && value.length > 0,
+        (value): value is string =>
+          typeof value === 'string' && value.length > 0,
       );
     } catch (error) {
       const errorMessage =
