@@ -20,6 +20,9 @@ const DEFAULT_API_URL = 'https://botapi.messenger.yandex.net/bot/v1';
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Файлы (docx статьи) могут быть заметно тяжелее текста — ждём дольше */
 const FILE_TIMEOUT_MS = 120_000;
+/** Попыток отправить файл: разовые обрывы связи с API случаются */
+const SEND_FILE_ATTEMPTS = 3;
+const SEND_FILE_RETRY_DELAY_MS = 2_000;
 
 /**
  * Низкоуровневый клиент Bot API Яндекс Мессенджера.
@@ -106,12 +109,39 @@ export class YandexMessengerApiService {
       filename,
     );
 
-    return this.request<YandexSendResult>(
-      'POST',
-      '/messages/sendFile/',
-      form,
-      FILE_TIMEOUT_MS,
-    );
+    // Без повтора разовый обрыв связи терял уже сгенерированную статью.
+    // Повторный запрос может продублировать файл, если первый всё же дошёл, —
+    // это меньшее зло. Таймаут не повторяем: он и так ждал две минуты.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.request<YandexSendResult>(
+          'POST',
+          '/messages/sendFile/',
+          form,
+          FILE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        if (attempt >= SEND_FILE_ATTEMPTS || !this.isRetryable(error)) {
+          throw error;
+        }
+        this.logger.warn(
+          `sendFile attempt ${attempt}/${SEND_FILE_ATTEMPTS} failed, retrying`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, SEND_FILE_RETRY_DELAY_MS * attempt),
+        );
+      }
+    }
+  }
+
+  private isRetryable(error: unknown) {
+    if (!(error instanceof YandexMessengerApiError)) {
+      return false;
+    }
+    if (error.status === undefined) {
+      return error.code !== 'ECONNABORTED' && error.code !== 'ETIMEDOUT';
+    }
+    return error.status === 429 || error.status >= 500;
   }
 
   /** Скачивает файл, присланный пользователем */
@@ -208,11 +238,19 @@ export class YandexMessengerApiService {
         }
       }
       const status = axiosError.response?.status;
+      // У сетевых сбоев axios message бывает пустым (AggregateError при
+      // подключении) — без кода в логе не понять, что случилось.
+      const code = status ? undefined : axiosError.code;
+      const reason =
+        description ||
+        axiosError.message ||
+        axiosError.cause?.message ||
+        'no response';
       const message = `Yandex Bot API ${label} failed${
         status ? ` (${status})` : ''
-      }: ${description ?? axiosError.message}`;
+      }${code ? ` [${code}]` : ''}: ${reason}`;
       this.logger.warn(message);
-      return new YandexMessengerApiError(message, status, description);
+      return new YandexMessengerApiError(message, status, description, code);
     }
 
     return error instanceof Error ? error : new Error(String(error));

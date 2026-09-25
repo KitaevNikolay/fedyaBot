@@ -1853,9 +1853,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       const buffer = await DocxUtil.createDocx(result.content);
-      await ctx.replyWithDocument(
-        new InputFile(buffer, `${baseFileName}.docx`),
-      );
+      try {
+        await ctx.replyWithDocument(
+          new InputFile(buffer, `${baseFileName}.docx`),
+        );
+      } catch (error) {
+        // Результат уже оплачен и сгенерирован: если файл не доставился даже
+        // после повторов, отдаём текстом и продолжаем сценарий, а не пишем
+        // «ошибка генерации» с потерей статьи (случай 25.09.2026).
+        this.logger.warn(
+          `Failed to deliver ${baseFileName}.docx, falling back to text: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        await ctx.reply(this.localesService.t('errors.file_delivery_failed'));
+        await ctx.reply(result.content);
+      }
     }
   }
 

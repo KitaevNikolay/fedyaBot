@@ -156,6 +156,8 @@ export class YandexMessengerApiError extends Error {
     message: string,
     readonly status?: number,
     readonly description?: string,
+    /** Сетевой код axios/Node (ECONNRESET, ETIMEDOUT…), если ответа не было */
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'YandexMessengerApiError';
