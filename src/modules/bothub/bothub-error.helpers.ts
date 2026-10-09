@@ -103,6 +103,33 @@ export function classifyBothubError(error: unknown): BothubFailure {
 
   const base = { status, code, retryAfterMs };
 
+  // Ответ модели оборван: HTTP-статуса нет, но причина известна точно.
+  const name = (error as { name?: string })?.name;
+  if (
+    name === 'BothubStreamAbortedError' ||
+    (name === 'BothubIncompleteResponseError' &&
+      (error as { finishReason?: string }).finishReason === 'error')
+  ) {
+    return {
+      ...base,
+      kind: 'unavailable',
+      messageKey: 'errors.generation_cut_off',
+      retryable: true,
+    };
+  }
+  if (name === 'BothubIncompleteResponseError') {
+    const finishReason = (error as { finishReason?: string }).finishReason;
+    return {
+      ...base,
+      kind: 'config',
+      messageKey:
+        finishReason === 'length'
+          ? 'errors.generation_token_limit'
+          : 'errors.generation_config',
+      retryable: false,
+    };
+  }
+
   // Ответа не было вовсе — DNS, обрыв соединения, таймаут.
   if (status === null) {
     const transportCode = shape.code ?? '';

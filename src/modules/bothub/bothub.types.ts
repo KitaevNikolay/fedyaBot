@@ -92,6 +92,35 @@ export class BothubStreamAbortedError extends Error {
   }
 }
 
+/**
+ * Модель закончила ответ не штатно: finish_reason=error (Bothub оборвал
+ * генерацию), length (кончился лимит токенов) или content_filter. Текст при
+ * этом может быть — но это обрывок, и сохранять его как результат нельзя:
+ * 09.10.2026 обрывок «Как уточн» ушёл дальше по пайплайну как готовая статья.
+ */
+export class BothubIncompleteResponseError extends Error {
+  constructor(
+    readonly finishReason: string,
+    readonly contentLength: number,
+    readonly reasoningLength: number,
+  ) {
+    super(
+      finishReason === 'length'
+        ? `Модель не успела выдать ответ: лимит токенов исчерпан (finish_reason=length, ` +
+            `текста ${contentLength} символов, рассуждений ${reasoningLength}). ` +
+            `Увеличьте «Максимум токенов» для этого шага в админке.`
+        : `Ответ модели оборван (finish_reason=${finishReason}, ` +
+            `текста ${contentLength} символов, рассуждений ${reasoningLength})`,
+    );
+    this.name = 'BothubIncompleteResponseError';
+  }
+
+  /** Обрыв на стороне Bothub лечится повтором, нехватка лимита — нет */
+  get isTransient() {
+    return this.finishReason === 'error';
+  }
+}
+
 export interface BothubBalanceResponse {
   subscription?: {
     plan?: {

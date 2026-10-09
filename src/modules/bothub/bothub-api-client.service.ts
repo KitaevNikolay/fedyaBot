@@ -10,6 +10,7 @@ import {
 import {
   BothubBalanceResponse,
   BothubGenerationError,
+  BothubIncompleteResponseError,
   BothubModelListResponse,
   BothubModelOption,
   BothubResponse,
@@ -111,6 +112,10 @@ export class BothubApiClientService {
     if (error instanceof BothubStreamAbortedError) {
       return true;
     }
+    // finish_reason=error — Bothub сам оборвал генерацию; повтор обычно проходит
+    if (error instanceof BothubIncompleteResponseError) {
+      return error.isTransient;
+    }
 
     const status = (error as { response?: { status?: number } }).response
       ?.status;
@@ -119,7 +124,9 @@ export class BothubApiClientService {
     }
 
     const code = (error as { code?: string }).code;
-    return code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND';
+    return (
+      code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND'
+    );
   }
 
   /** Достаёт из ответа Bothub код ошибки, чтобы бот показал внятную причину */
@@ -322,21 +329,27 @@ export class BothubApiClientService {
       this.logger.log(`Bothub usage: ${usage} caps`);
     }
 
+    const choice = data.choices?.[0];
+    const finishReason = choice?.finish_reason;
+    const reasoningLength = choice?.message?.reasoning?.length ?? 0;
+
+    // Принимаем только штатно законченный ответ. Обрыв с текстом опаснее
+    // пустого: обрывок выглядит как результат и уходит на следующие шаги.
+    // Reasoning-модели к тому же тратят лимит на рассуждения, и при малом
+    // maxTokens ответ обрывается ещё до текста.
+    if (
+      finishReason === 'error' ||
+      finishReason === 'length' ||
+      finishReason === 'content_filter'
+    ) {
+      throw new BothubIncompleteResponseError(
+        finishReason,
+        content?.length ?? 0,
+        reasoningLength,
+      );
+    }
+
     if (!content) {
-      const choice = data.choices?.[0];
-      const finishReason = choice?.finish_reason;
-      const reasoningLength = choice?.message?.reasoning?.length ?? 0;
-
-      // Reasoning-модели тратят лимит токенов на рассуждения: при слишком
-      // маленьком maxTokens ответ обрывается ещё до текста. Молча сохранять
-      // такой результат нельзя — это выглядит как «сгенерировалась пустота».
-      if (finishReason === 'length') {
-        throw new Error(
-          `Модель не успела выдать ответ: лимит токенов исчерпан (finish_reason=length, ` +
-            `рассуждений ${reasoningLength} символов). Увеличьте «Максимум токенов» для этого шага в админке.`,
-        );
-      }
-
       this.logger.warn(
         `Empty response from BotHub (finish_reason=${finishReason ?? 'unknown'})`,
       );
