@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { lastValueFrom } from 'rxjs';
 import { AppLoggerService } from '../../common/logger/app-logger.service';
 import { BothubRuntimeConfigService } from './bothub-runtime-config.service';
+import { BothubTrace } from './bothub-trace';
 import {
   classifyBothubError,
   getBothubErrorCode,
@@ -56,10 +57,12 @@ export class BothubApiClientService {
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const assembled = await this.postStreamWithLogging(url, payload, {
-          stage: settings?.type,
-          ...userContext,
-        });
+        const assembled = await this.postStreamWithLogging(
+          url,
+          payload,
+          { stage: settings?.type, ...userContext },
+          attempt + 1,
+        );
 
         return this.extractGenerationResult(assembled);
       } catch (error) {
@@ -346,6 +349,8 @@ export class BothubApiClientService {
         finishReason,
         content?.length ?? 0,
         reasoningLength,
+        data.traceId,
+        data.streamError,
       );
     }
 
@@ -411,6 +416,7 @@ export class BothubApiClientService {
     url: string,
     payload: Record<string, unknown>,
     userContext?: Record<string, unknown>,
+    attempt?: number,
   ): Promise<BothubResponse> {
     const streamPayload = {
       ...payload,
@@ -418,6 +424,20 @@ export class BothubApiClientService {
       // Без этого при стриминге не приходит расход и стоимость шага теряется
       stream_options: { include_usage: true },
     };
+    const headers = {
+      'Content-Type': 'application/json',
+      ...this.getAuthHeaders(),
+    };
+    const trace = new BothubTrace({
+      stage: userContext?.stage as string | undefined,
+      attempt,
+      user: {
+        messengerId: userContext?.messengerId,
+        username: userContext?.username,
+      },
+    });
+    trace.request('POST', url, headers, streamPayload);
+    let streamStarted = false;
 
     try {
       await this.appLogger.log({
@@ -431,10 +451,7 @@ export class BothubApiClientService {
 
       const response = await lastValueFrom(
         this.httpService.post(url, streamPayload, {
-          headers: {
-            'Content-Type': 'application/json',
-            ...this.getAuthHeaders(),
-          },
+          headers,
           timeout: 1800000,
           responseType: 'stream',
           maxContentLength: Infinity,
@@ -442,9 +459,27 @@ export class BothubApiClientService {
         }),
       );
 
+      trace.response(response.status, response.headers);
+      streamStarted = true;
       const assembled = await this.consumeGenerationStream(
         response.data as NodeJS.ReadableStream,
+        trace,
       );
+      const choice = assembled.choices?.[0];
+      trace.end('stream_end', {
+        finishReason: choice?.finish_reason,
+        contentLength: choice?.message?.content?.length ?? 0,
+        reasoningLength: choice?.message?.reasoning?.length ?? 0,
+        caps: assembled.usage?.bothub?.caps,
+        streamError: assembled.streamError,
+      });
+      assembled.traceId = await trace.save();
+      if (choice?.finish_reason && choice.finish_reason !== 'stop') {
+        this.logger.warn(
+          `Bothub stream finished with ${choice.finish_reason} ` +
+            `(stage: ${String(userContext?.stage ?? 'unknown')}, attempt ${attempt ?? 1}) [trace ${assembled.traceId}]`,
+        );
+      }
 
       await this.appLogger.log({
         type: 'external_response',
@@ -461,6 +496,32 @@ export class BothubApiClientService {
       // При responseType: 'stream' тело ошибки — тоже поток; дочитываем его,
       // иначе код ошибки (например NOT_ENOUGH_TOKENS) остался бы недоступен
       const normalized = await this.materializeStreamError(error);
+      const errorResponse = (
+        normalized as {
+          response?: { status?: number; headers?: unknown; data?: unknown };
+        }
+      ).response;
+      if (errorResponse) {
+        trace.httpError(
+          errorResponse.status,
+          errorResponse.headers,
+          errorResponse.data,
+        );
+      }
+      const errorMessage =
+        normalized instanceof Error ? normalized.message : String(normalized);
+      trace.end(streamStarted ? 'stream_error' : 'request_error', {
+        error: errorMessage,
+        socketError: {
+          code: (normalized as { code?: unknown }).code,
+          name: (normalized as { name?: unknown }).name,
+        },
+      });
+      const traceId = await trace.save();
+      this.logger.warn(
+        `Bothub request failed (stage: ${String(userContext?.stage ?? 'unknown')}, attempt ${attempt ?? 1}): ` +
+          `${errorMessage} [trace ${traceId}]`,
+      );
       await this.logExternalError(
         'POST',
         url,
@@ -475,21 +536,29 @@ export class BothubApiClientService {
   /** Склеивает SSE-чанки Bothub в привычный вид ответа */
   private async consumeGenerationStream(
     stream: NodeJS.ReadableStream,
+    trace?: BothubTrace,
   ): Promise<BothubResponse> {
     let buffer = '';
     let content = '';
     let reasoning = '';
     let finishReason: string | undefined;
     let caps: number | undefined;
+    let streamError: unknown;
 
     const handleLine = (line: string) => {
       const trimmed = line.trim();
+      if (!trimmed) {
+        return;
+      }
       if (!trimmed.startsWith('data:')) {
+        // event: и комментарии SSE тоже сохраняем — в них может быть причина обрыва
+        trace?.line(trimmed);
         return;
       }
 
       const data = trimmed.slice(5).trim();
       if (!data || data === '[DONE]') {
+        trace?.line(trimmed);
         return;
       }
 
@@ -499,12 +568,18 @@ export class BothubApiClientService {
           finish_reason?: string | null;
         }>;
         usage?: { bothub?: { caps?: number } };
+        error?: unknown;
       };
       try {
         parsed = JSON.parse(data);
       } catch {
         // Битый чанк пропускаем: обрыв ответа поймаем по отсутствию finish_reason
+        trace?.line(trimmed);
         return;
+      }
+      trace?.line(trimmed, parsed as Record<string, unknown>);
+      if (parsed.error !== undefined) {
+        streamError = parsed.error;
       }
 
       const choice = parsed.choices?.[0];
@@ -523,7 +598,9 @@ export class BothubApiClientService {
     };
 
     for await (const chunk of stream as AsyncIterable<Buffer | string>) {
-      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      trace?.chunk(text);
+      buffer += text;
 
       let newline: number;
       while ((newline = buffer.indexOf('\n')) !== -1) {
@@ -548,6 +625,7 @@ export class BothubApiClientService {
         },
       ],
       ...(caps !== undefined ? { usage: { bothub: { caps } } } : {}),
+      ...(streamError !== undefined ? { streamError } : {}),
     };
   }
 

@@ -52,6 +52,10 @@ export interface BothubResponse {
       caps?: number;
     };
   };
+  /** id трассы запроса (logs/bothub-traces), чтобы связать ошибку с данными */
+  traceId?: string;
+  /** Объект error из потока, если Bothub прислал его вместе с обрывом */
+  streamError?: unknown;
 }
 
 /**
@@ -103,6 +107,8 @@ export class BothubIncompleteResponseError extends Error {
     readonly finishReason: string,
     readonly contentLength: number,
     readonly reasoningLength: number,
+    readonly traceId?: string,
+    readonly streamError?: unknown,
   ) {
     super(
       finishReason === 'length'
@@ -110,7 +116,11 @@ export class BothubIncompleteResponseError extends Error {
             `текста ${contentLength} символов, рассуждений ${reasoningLength}). ` +
             `Увеличьте «Максимум токенов» для этого шага в админке.`
         : `Ответ модели оборван (finish_reason=${finishReason}, ` +
-            `текста ${contentLength} символов, рассуждений ${reasoningLength})`,
+            `текста ${contentLength} символов, рассуждений ${reasoningLength})` +
+            (streamError !== undefined
+              ? `: ${JSON.stringify(streamError).slice(0, 500)}`
+              : '') +
+            (traceId ? ` [trace ${traceId}]` : ''),
     );
     this.name = 'BothubIncompleteResponseError';
   }
