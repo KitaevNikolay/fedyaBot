@@ -12,6 +12,9 @@ model User {
   id         String    @id @default(uuid())
   /// Логин пользователя в Яндекс Мессенджере (до миграции — Telegram ID)
   messengerId String   @unique
+  /// Telegram ID для временного режима MESSENGER_PLATFORM=telegram. У пользователей,
+  /// заведённых до 2.0, заполнен из дампа до переезда на Яндекс (там был telegramId)
+  telegramId String?   @unique
   isActive   Boolean   @default(false)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt

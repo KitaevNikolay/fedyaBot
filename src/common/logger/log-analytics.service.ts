@@ -132,8 +132,9 @@ export class LogAnalyticsService {
               select: { id: true },
             })
           : null
-        : await this.prisma.user.findUnique({
-            where: { messengerId },
+        : // В режиме Telegram собеседник приходит с Telegram ID
+          await this.prisma.user.findFirst({
+            where: { OR: [{ messengerId }, { telegramId: messengerId }] },
             select: { id: true },
           });
     const userId = user?.id ?? userIdFromPayload ?? undefined;

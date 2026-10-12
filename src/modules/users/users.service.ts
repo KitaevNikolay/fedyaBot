@@ -17,9 +17,23 @@ export class UsersService {
     private readonly configService: ConfigService,
   ) {}
 
-  findByMessengerId(messengerId: string) {
+  /**
+   * В режиме Telegram собеседник приходит с числовым Telegram ID: сначала
+   * ищем по telegramId (аккаунты, заведённые до переезда на Яндекс), затем по
+   * messengerId (новые пользователи, появившиеся уже в Telegram-режиме).
+   */
+  async findByMessengerId(messengerId: string) {
+    const normalized = UsersService.normalizeMessengerId(messengerId);
+    if (this.isTelegramMode()) {
+      const byTelegram = await this.prisma.user.findUnique({
+        where: { telegramId: normalized },
+      });
+      if (byTelegram) {
+        return byTelegram;
+      }
+    }
     return this.prisma.user.findUnique({
-      where: { messengerId: UsersService.normalizeMessengerId(messengerId) },
+      where: { messengerId: normalized },
     });
   }
 
@@ -36,9 +50,11 @@ export class UsersService {
   }
 
   createInactive(messengerId: string, profile?: MessengerProfile) {
+    const normalized = UsersService.normalizeMessengerId(messengerId);
     return this.prisma.user.create({
       data: {
-        messengerId: UsersService.normalizeMessengerId(messengerId),
+        messengerId: normalized,
+        ...this.telegramIdFor(normalized),
         username: profile?.username ?? null,
         firstName: profile?.firstName ?? null,
         lastName: profile?.lastName ?? null,
@@ -47,7 +63,7 @@ export class UsersService {
     });
   }
 
-  updateProfile(messengerId: string, profile?: MessengerProfile) {
+  async updateProfile(messengerId: string, profile?: MessengerProfile) {
     const data: {
       username?: string | null;
       firstName?: string | null;
@@ -62,10 +78,11 @@ export class UsersService {
     if (profile?.lastName !== undefined) {
       data.lastName = profile.lastName ?? null;
     }
-    return this.prisma.user.update({
-      where: { messengerId: UsersService.normalizeMessengerId(messengerId) },
-      data,
-    });
+    const user = await this.findByMessengerId(messengerId);
+    if (!user) {
+      throw new Error(`User not found: ${messengerId}`);
+    }
+    return this.prisma.user.update({ where: { id: user.id }, data });
   }
 
   /**
@@ -83,6 +100,7 @@ export class UsersService {
       const created = await this.prisma.user.create({
         data: {
           messengerId: normalizedId,
+          ...this.telegramIdFor(normalizedId),
           username: profile?.username ?? null,
           firstName: profile?.firstName ?? null,
           lastName: profile?.lastName ?? null,
@@ -129,6 +147,22 @@ export class UsersService {
   /** Логины Яндекса регистронезависимы — храним в нижнем регистре */
   static normalizeMessengerId(value: string) {
     return value.trim().toLowerCase();
+  }
+
+  private isTelegramMode() {
+    return (
+      this.configService
+        .get<string>('MESSENGER_PLATFORM')
+        ?.trim()
+        .toLowerCase() === 'telegram'
+    );
+  }
+
+  /** Новый пользователь Telegram-режима: его ID сразу и в telegramId */
+  private telegramIdFor(normalizedId: string) {
+    return this.isTelegramMode() && /^\d+$/.test(normalizedId)
+      ? { telegramId: normalizedId }
+      : {};
   }
 
   private getBootstrapAdminLogins() {

@@ -120,12 +120,15 @@ export class AdminAuthCodeService {
       return handle;
     }
     const user = await this.usersService.findByUsername(handle);
-    if (!user || !/^\d+$/.test(user.messengerId)) {
+    const telegramId =
+      user?.telegramId ??
+      (user && /^\d+$/.test(user.messengerId) ? user.messengerId : null);
+    if (!telegramId) {
       throw new BadRequestException(
         'Пользователь Telegram не найден. Напишите боту /start или укажите числовой Telegram ID.',
       );
     }
-    return user.messengerId;
+    return telegramId;
   }
 
   private hash(login: string, code: string) {
