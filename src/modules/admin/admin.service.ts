@@ -99,17 +99,21 @@ export class AdminService {
     };
   }
 
-  /** Шаг 1: отправить одноразовый код в Яндекс Мессенджер */
+  /** Шаг 1: отправить одноразовый код в мессенджер */
   async requestAuthCode(login: string) {
     return this.adminAuthCodeService.requestCode(login);
   }
 
   /** Шаг 2: проверить код, зарегистрировать пользователя и выдать сессию */
   async verifyAuthCode(rawLogin: string, code: string) {
-    const login = this.adminAuthCodeService.verifyCode(rawLogin, code);
-    const { user } = await this.usersService.registerFromMessenger(login, {
-      username: login,
-    });
+    const login = await this.adminAuthCodeService.verifyCode(rawLogin, code);
+    // В Telegram login — числовой ID, @username затирать им нельзя
+    const { user } = await this.usersService.registerFromMessenger(
+      login,
+      this.adminAuthCodeService.platform === 'telegram'
+        ? {}
+        : { username: login },
+    );
 
     const status = user.isActive
       ? user.role === 'admin'

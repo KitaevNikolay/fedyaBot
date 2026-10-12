@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { MessengerContext } from './messenger-context';
 import { InlineKeyboard, InputFile } from './messenger-keyboard';
-import { YandexMessengerApiService } from './yandex-messenger-api.service';
+import { MessengerTransport } from './messenger-transport';
 import { YandexUpdate } from './yandex-messenger.types';
 
 export type MessengerHandler = (ctx: MessengerContext) => Promise<void> | void;
@@ -28,7 +28,7 @@ export interface MessengerBotOptions {
 }
 
 /**
- * Маршрутизатор обновлений Яндекс Мессенджера: команды, callback-кнопки,
+ * Маршрутизатор обновлений мессенджера (Яндекс или Telegram): команды, callback-кнопки,
  * текст и документы. Обновления одного чата обрабатываются строго по очереди,
  * разные чаты — параллельно, поэтому долгая генерация у одного редактора
  * не блокирует остальных.
@@ -58,12 +58,15 @@ export class MessengerBot {
   private pollingAbort: AbortController | null = null;
 
   constructor(
-    private readonly client: YandexMessengerApiService,
+    private readonly client: MessengerTransport,
     private readonly options: MessengerBotOptions = {},
   ) {
     this.api = {
       sendMessage: async (login, text, sendOptions = {}) => {
-        const chunks = MessengerContext.splitText(text);
+        const chunks = MessengerContext.splitText(
+          text,
+          this.client.maxMessageLength,
+        );
         let lastMessageId = 0;
         for (let index = 0; index < chunks.length; index++) {
           const isLast = index === chunks.length - 1;

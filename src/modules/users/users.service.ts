@@ -23,6 +23,14 @@ export class UsersService {
     });
   }
 
+  /** Telegram @username без «@»; сравнение регистронезависимо (collation MySQL) */
+  findByUsername(username: string) {
+    return this.prisma.user.findFirst({
+      where: { username },
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
+
   findById(id: string) {
     return this.prisma.user.findUnique({ where: { id } });
   }

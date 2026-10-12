@@ -66,8 +66,9 @@
 | `PORT` / `BOT_PORT` | нет | Порт приложения в контейнере, 3000. |
 | `CABINET_PORT` | нет | Порт cabinet-api в контейнере, 3001. |
 
-Больше **не используются** и могут быть удалены: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_URL`,
-`TELEGRAM_API_BASE_URL`, `TELEGRAM_PROXY_URL`, `VITE_TELEGRAM_BOT_USERNAME`.
+Больше **не используются**: `TELEGRAM_WEBHOOK_URL`, `VITE_TELEGRAM_BOT_USERNAME`.
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_BASE_URL`, `TELEGRAM_PROXY_URL` нужны только для временного
+режима `MESSENGER_PLATFORM=telegram` — см. [TELEGRAM_FALLBACK.md](TELEGRAM_FALLBACK.md).
 
 ---
 

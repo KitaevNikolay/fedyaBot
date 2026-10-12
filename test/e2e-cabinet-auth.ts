@@ -20,12 +20,16 @@ import { ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { CabinetAppModule } from '../src/cabinet-app.module';
 import { PrismaService } from '../src/database/prisma.service';
-import { YandexMessengerApiService } from '../src/modules/messenger/yandex-messenger-api.service';
+import { MessengerTransport } from '../src/modules/messenger/messenger-transport';
 
 const outbox: Array<{ login?: string; text: string }> = [];
 let failSend = false;
 
 const fakeApi = {
+  platform: 'yandex' as const,
+  displayName: 'Яндекс Мессенджер',
+  maxMessageLength: 6000,
+  processingRefreshMs: 50_000,
   isConfigured: () => true,
   sendText: async (target: { login?: string }, text: string) => {
     if (failSend) {
@@ -40,7 +44,7 @@ async function main() {
   const moduleRef = await Test.createTestingModule({
     imports: [CabinetAppModule],
   })
-    .overrideProvider(YandexMessengerApiService)
+    .overrideProvider(MessengerTransport)
     .useValue(fakeApi)
     .compile();
   const app = moduleRef.createNestApplication({ logger: ['error', 'warn'] });

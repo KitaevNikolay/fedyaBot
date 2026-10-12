@@ -12,6 +12,12 @@ export type {
 } from './messenger-context';
 export { InlineKeyboard, InputFile } from './messenger-keyboard';
 export { MessengerModule } from './messenger.module';
+export { MessengerTransport } from './messenger-transport';
+export type { MessengerPlatform } from './messenger-transport';
+export {
+  TELEGRAM_MESSAGE_MAX_LENGTH,
+  TelegramBotApiService,
+} from './telegram-bot-api.service';
 export {
   YANDEX_MESSAGE_MAX_LENGTH,
   YandexMessengerApiService,

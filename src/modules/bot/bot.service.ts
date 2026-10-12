@@ -14,7 +14,7 @@ import {
   InputFile,
   MessengerBot,
   MessengerContext as Context,
-  YandexMessengerApiService,
+  MessengerTransport,
 } from '../messenger';
 import { DocxUtil } from '../../common/utils/docx.util';
 import { ConstantsService } from '../../config/constants.service';
@@ -128,8 +128,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   };
 
   private static readonly GENERATION_KEY_PREFIX = 'generation:';
-  /** Смещение getUpdates: переживает рестарт, чтобы не перечитывать очередь */
-  private static readonly UPDATES_OFFSET_KEY = 'yandex:updates_offset';
+  /**
+   * Смещение getUpdates: переживает рестарт, чтобы не перечитывать очередь.
+   * У каждой платформы своя нумерация update_id — и свой ключ.
+   */
+  private static readonly UPDATES_OFFSET_KEYS = {
+    yandex: 'yandex:updates_offset',
+    telegram: 'telegram:updates_offset',
+  } as const;
 
   private static readonly FILE_UPLOAD_STATES = new Set([
     'WAITING_FOR_QUESTIONS_FILE',
@@ -201,24 +207,33 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     private readonly technicalArticleAdditionsService: TechnicalArticleAdditionsService,
     private readonly textRuService: TextRuService,
     private readonly bitrixService: BitrixService,
-    private readonly messengerApi: YandexMessengerApiService,
+    private readonly messengerApi: MessengerTransport,
   ) {}
 
   onModuleInit() {
     if (!this.messengerApi.isConfigured()) {
-      throw new Error('YANDEX_BOT_TOKEN is required');
+      throw new Error(
+        this.messengerApi.platform === 'telegram'
+          ? 'TELEGRAM_BOT_TOKEN is required'
+          : 'YANDEX_BOT_TOKEN is required',
+      );
     }
 
+    const offsetKey =
+      BotService.UPDATES_OFFSET_KEYS[this.messengerApi.platform];
     this.bot = new MessengerBot(this.messengerApi, {
       loadOffset: async () => {
-        const raw = await this.redisService.get(BotService.UPDATES_OFFSET_KEY);
+        const raw = await this.redisService.get(offsetKey);
         const parsed = raw ? Number(raw) : NaN;
         return Number.isFinite(parsed) ? parsed : null;
       },
-      saveOffset: (offset) =>
-        this.redisService.set(BotService.UPDATES_OFFSET_KEY, String(offset)),
+      saveOffset: (offset) => this.redisService.set(offsetKey, String(offset)),
     });
-    const webhookUrl = this.configService.get<string>('YANDEX_WEBHOOK_URL');
+    // Вебхук принимает только формат Яндекса; Telegram работает через polling
+    const webhookUrl =
+      this.messengerApi.platform === 'yandex'
+        ? this.configService.get<string>('YANDEX_WEBHOOK_URL')
+        : undefined;
     const startCommand =
       this.constantsService.get<string>('commands.start') ?? 'start';
     const cancelCommand =
@@ -2695,14 +2710,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       try {
         // Пока задан webhook_url, getUpdates ничего не возвращает
         await this.messengerApi.setWebhook(null);
-        this.logger.log('Yandex Messenger webhook removed, starting polling');
+        const platformName = this.messengerApi.displayName;
+        this.logger.log(`${platformName} webhook removed, starting polling`);
 
         await this.bot.start((botInfo) => {
-          this.logger.log(`Yandex Messenger bot started as ${botInfo.login}`);
+          this.logger.log(`${platformName} bot started as ${botInfo.login}`);
         });
       } catch (error) {
         this.pollingStarted = false;
-        this.logger.error(`Failed to start Yandex Messenger bot: ${error}`);
+        this.logger.error(
+          `Failed to start ${this.messengerApi.displayName} bot: ${error}`,
+        );
       }
     })();
   }

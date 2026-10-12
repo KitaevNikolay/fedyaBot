@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash, randomInt, timingSafeEqual } from 'crypto';
-import { YandexMessengerApiService } from '../messenger/yandex-messenger-api.service';
+import { MessengerTransport } from '../messenger/messenger-transport';
 import { UsersService } from '../users/users.service';
 
 type PendingCode = {
@@ -21,18 +21,26 @@ const MAX_ATTEMPTS = 5;
 
 /**
  * Вход в кабинет по одноразовому коду: код уходит пользователю в личный чат
- * с ботом в Яндекс Мессенджере. Коды живут в памяти процесса — кабинет
- * работает одним инстансом, а срок жизни кода пять минут.
+ * с ботом в Яндекс Мессенджере (или в Telegram при MESSENGER_PLATFORM=telegram).
+ * Коды живут в памяти процесса — кабинет работает одним инстансом, а срок
+ * жизни кода пять минут.
  */
 @Injectable()
 export class AdminAuthCodeService {
   private readonly logger = new Logger(AdminAuthCodeService.name);
   private readonly pending = new Map<string, PendingCode>();
 
-  constructor(private readonly messengerApi: YandexMessengerApiService) {}
+  constructor(
+    private readonly messengerApi: MessengerTransport,
+    private readonly usersService: UsersService,
+  ) {}
+
+  get platform() {
+    return this.messengerApi.platform;
+  }
 
   async requestCode(rawLogin: string) {
-    const login = UsersService.normalizeMessengerId(rawLogin);
+    const login = await this.resolveMessengerId(rawLogin);
     this.cleanup();
 
     const existing = this.pending.get(login);
@@ -58,7 +66,7 @@ export class AdminAuthCodeService {
     } catch (error) {
       this.logger.warn(`Failed to send auth code to ${login}: ${error}`);
       throw new BadRequestException(
-        'Не удалось отправить код в Яндекс Мессенджер. Проверьте логин и что вы уже писали боту.',
+        `Не удалось отправить код в ${this.messengerApi.displayName}. Проверьте логин и что вы уже писали боту.`,
       );
     }
 
@@ -66,8 +74,8 @@ export class AdminAuthCodeService {
     return { ok: true, expiresInSeconds: CODE_TTL_MS / 1000 };
   }
 
-  verifyCode(rawLogin: string, code: string) {
-    const login = UsersService.normalizeMessengerId(rawLogin);
+  async verifyCode(rawLogin: string, code: string) {
+    const login = await this.resolveMessengerId(rawLogin);
     this.cleanup();
 
     const record = this.pending.get(login);
@@ -94,6 +102,30 @@ export class AdminAuthCodeService {
 
     this.pending.delete(login);
     return login;
+  }
+
+  /**
+   * В Яндексе логин и есть messengerId. В Telegram писать можно только по
+   * числовому ID, а людям привычнее @username — ищем его среди тех, кто
+   * уже писал боту.
+   */
+  private async resolveMessengerId(rawLogin: string) {
+    const login = UsersService.normalizeMessengerId(rawLogin);
+    if (this.messengerApi.platform !== 'telegram') {
+      return login;
+    }
+
+    const handle = login.replace(/^@/, '');
+    if (/^\d+$/.test(handle)) {
+      return handle;
+    }
+    const user = await this.usersService.findByUsername(handle);
+    if (!user || !/^\d+$/.test(user.messengerId)) {
+      throw new BadRequestException(
+        'Пользователь Telegram не найден. Напишите боту /start или укажите числовой Telegram ID.',
+      );
+    }
+    return user.messengerId;
   }
 
   private hash(login: string, code: string) {

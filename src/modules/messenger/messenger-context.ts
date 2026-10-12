@@ -1,8 +1,6 @@
 import { InlineKeyboard, InputFile } from './messenger-keyboard';
-import {
-  YANDEX_MESSAGE_MAX_LENGTH,
-  YandexMessengerApiService,
-} from './yandex-messenger-api.service';
+import { MessengerTransport } from './messenger-transport';
+import { YANDEX_MESSAGE_MAX_LENGTH } from './yandex-messenger-api.service';
 import { YandexChatTarget, YandexUpdate } from './yandex-messenger.types';
 
 export interface MessengerUser {
@@ -62,7 +60,7 @@ export class MessengerContext {
 
   constructor(
     readonly update: YandexUpdate,
-    private readonly api: YandexMessengerApiService,
+    private readonly api: MessengerTransport,
   ) {
     this.from = MessengerContext.buildUser(update);
     this.chat = {
@@ -104,7 +102,7 @@ export class MessengerContext {
   }
 
   async reply(text: string, options: ReplyOptions = {}) {
-    const chunks = MessengerContext.splitText(text);
+    const chunks = MessengerContext.splitText(text, this.api.maxMessageLength);
     let lastMessageId = 0;
     for (let index = 0; index < chunks.length; index++) {
       const isLast = index === chunks.length - 1;
@@ -147,7 +145,10 @@ export class MessengerContext {
    * его, пока не вызван возвращённый stop(). В групповых чатах processing
    * недоступен — там показывается обычное «печатает…».
    */
-  startProcessing(text: string, refreshMs = 50_000): () => void {
+  startProcessing(
+    text: string,
+    refreshMs = this.api.processingRefreshMs,
+  ): () => void {
     const isPrivate = this.update.chat.type === 'private';
     const send = () =>
       this.api
@@ -234,7 +235,9 @@ export class MessengerContext {
       id,
       login,
       guid: sender.id,
-      username: login,
+      // Telegram передаёт @username отдельно (ключ есть, даже если пусто),
+      // в Яндексе его роль играет логин
+      username: 'username' in sender ? sender.username : login,
       first_name: firstName,
       last_name: rest.length > 0 ? rest.join(' ') : undefined,
       display_name: sender.display_name,

@@ -361,7 +361,7 @@ export function UserHistoryPage() {
                     <div>
                       <Typography.Title level={5}>{getDisplayName(user)}</Typography.Title>
                       <Typography.Text type="secondary">
-                        {`Логин Яндекса: ${user.messengerId}`}
+                        {`ID в мессенджере: ${user.messengerId}`}
                       </Typography.Text>
                     </div>
                     <Space wrap>

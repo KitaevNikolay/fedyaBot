@@ -23,7 +23,7 @@ import { AppModule } from '../src/app.module';
 import { DocxUtil } from '../src/common/utils/docx.util';
 import { PrismaService } from '../src/database/prisma.service';
 import { BotService } from '../src/modules/bot/bot.service';
-import { YandexMessengerApiService } from '../src/modules/messenger/yandex-messenger-api.service';
+import { MessengerTransport } from '../src/modules/messenger/messenger-transport';
 import {
   YandexSuggestButtons,
   YandexUpdate,
@@ -79,6 +79,10 @@ function buttonsOf(suggest?: YandexSuggestButtons): string[] {
 }
 
 const fakeApi = {
+  platform: 'yandex' as const,
+  displayName: 'Яндекс Мессенджер',
+  maxMessageLength: 6000,
+  processingRefreshMs: 50_000,
   isConfigured: () => true,
   getSelf: async () => ({ ok: true, id: 'bot', login: 'fake-bot' }),
   setWebhook: async () => ({ ok: true, id: 'bot', login: 'fake-bot' }),
@@ -150,7 +154,7 @@ function textsSince(index: number) {
 
 async function main() {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-    .overrideProvider(YandexMessengerApiService)
+    .overrideProvider(MessengerTransport)
     .useValue(fakeApi)
     .compile();
   const app = moduleRef.createNestApplication({ logger: ['error', 'warn'] });

@@ -209,7 +209,7 @@ export function UsersPage() {
       render: (_, user) => (
         <div className="user-cell">
           <Typography.Text strong>{getDisplayName(user)}</Typography.Text>
-          <Typography.Text type="secondary">{`Логин Яндекса: ${user.messengerId}`}</Typography.Text>
+          <Typography.Text type="secondary">{`ID в мессенджере: ${user.messengerId}`}</Typography.Text>
         </div>
       ),
     },
@@ -400,7 +400,7 @@ export function UsersPage() {
               <Descriptions.Item label="Пользователь">
                 {getDisplayName(overview.user)}
               </Descriptions.Item>
-              <Descriptions.Item label="Логин Яндекса">
+              <Descriptions.Item label="ID в мессенджере">
                 {overview.user.messengerId}
               </Descriptions.Item>
               <Descriptions.Item label="Последняя активность">

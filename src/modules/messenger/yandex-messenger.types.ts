@@ -10,6 +10,8 @@ export interface YandexSender {
   login?: string;
   display_name?: string;
   robot?: boolean;
+  /** Только Telegram: @username (login там — числовой id пользователя) */
+  username?: string;
 }
 
 export interface YandexChat {

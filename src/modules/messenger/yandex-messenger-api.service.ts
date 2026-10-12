@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import { MessengerTransport } from './messenger-transport';
 import {
   YandexBotInfo,
   YandexChatTarget,
@@ -29,12 +30,19 @@ const SEND_FILE_RETRY_DELAY_MS = 2_000;
  * Документация: https://yandex.ru/dev/messenger/doc/ru/
  */
 @Injectable()
-export class YandexMessengerApiService {
+export class YandexMessengerApiService extends MessengerTransport {
+  readonly platform = 'yandex' as const;
+  readonly displayName = 'Яндекс Мессенджер';
+  readonly maxMessageLength = YANDEX_MESSAGE_MAX_LENGTH;
+  /** processing-индикатор живёт до 60 секунд */
+  readonly processingRefreshMs = 50_000;
+
   private readonly logger = new Logger(YandexMessengerApiService.name);
   private readonly http: AxiosInstance;
   private readonly token: string | null;
 
   constructor(private readonly configService: ConfigService) {
+    super();
     this.token = this.configService.get<string>('YANDEX_BOT_TOKEN') ?? null;
     const baseURL = (
       this.configService.get<string>('YANDEX_BOT_API_URL') ?? DEFAULT_API_URL

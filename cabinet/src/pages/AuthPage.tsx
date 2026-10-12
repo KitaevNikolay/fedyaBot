@@ -66,7 +66,7 @@ export function AuthPage() {
       setLogin(normalized);
       setStep('code');
       setAuthResult(null);
-      void message.success('Код отправлен в Яндекс Мессенджер.');
+      void message.success('Код отправлен в чат с ботом.');
     } catch (error) {
       void message.error(
         error instanceof Error ? error.message : 'Не удалось отправить код.',
@@ -118,14 +118,15 @@ export function AuthPage() {
         <Card className="auth-intro-card">
           <Space direction="vertical" size={20}>
             <Tag icon={<LockOutlined />} color="processing" className="auth-tag">
-              Код из Яндекс Мессенджера
+              Код из чата с ботом
             </Tag>
             <Typography.Title level={2} className="auth-title">
               Вход в кабинет
             </Typography.Title>
             <Typography.Paragraph className="auth-description">
-              Введите логин Яндекса, под которым вы общаетесь с ботом. Бот пришлёт
-              одноразовый код в личный чат — им и подтверждается вход.
+              Пока бот временно работает в Telegram, введите свой @username или
+              числовой Telegram ID. Бот пришлёт одноразовый код в личный чат — им
+              и подтверждается вход.
             </Typography.Paragraph>
             <Alert
               type="info"
@@ -140,24 +141,24 @@ export function AuthPage() {
           <Space direction="vertical" size={24} className="auth-widget-stack">
             <div>
               <Typography.Title level={4}>
-                Вход через <MessageOutlined /> Яндекс Мессенджер
+                Вход через <MessageOutlined /> Telegram
               </Typography.Title>
             </div>
 
             {step === 'login' ? (
               <Form layout="vertical" onFinish={handleRequestCode} disabled={loading}>
                 <Form.Item
-                  label="Логин Яндекса"
+                  label="Telegram: @username или ID"
                   name="login"
                   rules={[
                     { required: true, message: 'Укажите логин' },
                     {
                       pattern: /^[a-zA-Z0-9._@-]+$/,
-                      message: 'Логин: латиница, цифры, точка, дефис или @домен',
+                      message: 'Латиница, цифры, подчёркивание или @',
                     },
                   ]}
                 >
-                  <Input placeholder="ivan.petrov или ivan@company.ru" autoFocus />
+                  <Input placeholder="@ivan_petrov или 123456789" autoFocus />
                 </Form.Item>
                 <Button type="primary" htmlType="submit" loading={loading} block>
                   Получить код
@@ -205,7 +206,7 @@ export function AuthPage() {
                     .filter(Boolean)
                     .join(' ') || authResult.user.username || authResult.user.messengerId}
                 </Descriptions.Item>
-                <Descriptions.Item label="Логин Яндекса">
+                <Descriptions.Item label="ID в мессенджере">
                   {authResult.user.messengerId}
                 </Descriptions.Item>
                 <Descriptions.Item label="Статус доступа">

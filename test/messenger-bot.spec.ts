@@ -10,7 +10,7 @@ import {
   InlineKeyboard,
   InputFile,
 } from '../src/modules/messenger/messenger-keyboard';
-import { YandexMessengerApiService } from '../src/modules/messenger/yandex-messenger-api.service';
+import { MessengerTransport } from '../src/modules/messenger/messenger-transport';
 import { YandexUpdate } from '../src/modules/messenger/yandex-messenger.types';
 
 type Sent = { kind: string; target: unknown; payload: unknown };
@@ -19,6 +19,10 @@ function createFakeApi() {
   const sent: Sent[] = [];
   let messageId = 100;
   const api = {
+    platform: 'yandex' as const,
+    displayName: 'Яндекс Мессенджер',
+    maxMessageLength: 6000,
+    processingRefreshMs: 50_000,
     isConfigured: () => true,
     sendText: async (target: unknown, text: string, options: unknown) => {
       sent.push({ kind: 'text', target, payload: { text, options } });
@@ -46,7 +50,7 @@ function createFakeApi() {
       sent.push({ kind: 'typing', target, payload: options });
     },
   };
-  return { api: api as unknown as YandexMessengerApiService, sent };
+  return { api: api as unknown as MessengerTransport, sent };
 }
 
 function privateUpdate(

@@ -37,7 +37,10 @@ async function bootstrap() {
   // поэтому отвечаем сразу, а обновления обрабатываем в фоне; повторные
   // доставки одного update_id отсекает дедупликация в BotService.
   const webhookUrl = configService.get<string>('YANDEX_WEBHOOK_URL');
-  if (webhookUrl) {
+  const isTelegram =
+    configService.get<string>('MESSENGER_PLATFORM')?.trim().toLowerCase() ===
+    'telegram';
+  if (webhookUrl && !isTelegram) {
     const webhookPath = new URL(webhookUrl).pathname;
     app.use(
       webhookPath,
