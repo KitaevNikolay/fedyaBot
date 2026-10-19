@@ -119,6 +119,11 @@ export class BothubApiClientService {
     if (error instanceof BothubIncompleteResponseError) {
       return error.isTransient;
     }
+    // Модерация Bothub (с 19.10.2026) срабатывает ложно и недетерминированно:
+    // тот же запрос через минуту проходит. Отказ приходит за ~2 с до генерации.
+    if (getBothubErrorCode(error) === 'VIOLATION') {
+      return true;
+    }
 
     const status = (error as { response?: { status?: number } }).response
       ?.status;

@@ -73,8 +73,20 @@ export class BothubGenerationError extends Error {
     this.name = 'BothubGenerationError';
   }
 
+  /**
+   * 403 без кода остаётся признаком баланса для совместимости, но 403 с
+   * другим кодом — нет: 19.10.2026 Bothub начал отвечать 403 VIOLATION
+   * (модерация), и пользователи видели «закончился баланс» при 200 млн caps.
+   */
   get isBalanceExhausted() {
-    return this.code === 'NOT_ENOUGH_TOKENS' || this.status === 403;
+    return (
+      this.code === 'NOT_ENOUGH_TOKENS' || (this.status === 403 && !this.code)
+    );
+  }
+
+  /** Запрос отклонён модерацией Bothub */
+  get isModerationRejected() {
+    return this.code === 'VIOLATION';
   }
 }
 

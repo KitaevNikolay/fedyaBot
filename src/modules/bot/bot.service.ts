@@ -882,7 +882,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     this.logger.warn(
       `Generation failed (kind: ${failure.kind}, status: ${failure.status ?? 'none'}, code: ${failure.code ?? 'none'})`,
     );
-    await ctx.reply(this.localesService.t(failure.messageKey));
+    // Причину отказа модерации показываем дословно — по ней видно, что
+    // срабатывание ложное, и её же нужно пересылать в поддержку Bothub
+    const reason =
+      failure.kind === 'moderation' && error instanceof Error
+        ? error.message
+        : '';
+    await ctx.reply(this.localesService.t(failure.messageKey, { reason }));
   }
 
   private async logGenerationError(

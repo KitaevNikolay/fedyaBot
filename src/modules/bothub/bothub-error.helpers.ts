@@ -12,6 +12,7 @@ export type BothubFailureKind =
   | 'network'
   | 'auth'
   | 'config'
+  | 'moderation'
   | 'unknown';
 
 export interface BothubFailure {
@@ -177,6 +178,15 @@ export function classifyBothubError(error: unknown): BothubFailure {
       ...base,
       kind: 'unavailable',
       messageKey: 'errors.generation_unavailable',
+      retryable: true,
+    };
+  }
+
+  if (code === 'VIOLATION') {
+    return {
+      ...base,
+      kind: 'moderation',
+      messageKey: 'errors.generation_moderation',
       retryable: true,
     };
   }
