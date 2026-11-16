@@ -32,6 +32,8 @@ const FILE_TIMEOUT_MS = 120_000;
 const POLL_TIMEOUT_SECONDS = 25;
 const SEND_FILE_ATTEMPTS = 3;
 const SEND_FILE_RETRY_DELAY_MS = 2_000;
+const DOWNLOAD_FILE_ATTEMPTS = 3;
+const DOWNLOAD_FILE_RETRY_DELAY_MS = 2_000;
 /** Дольше ждать по 429 не будем — пусть падает, как любая другая ошибка */
 const MAX_RETRY_AFTER_SECONDS = 30;
 /** Ограничение Telegram на callback_data кнопки */
@@ -236,22 +238,38 @@ export class TelegramBotApiService extends MessengerTransport {
   }
 
   async getFile(fileId: string): Promise<Buffer> {
-    const file = await this.request<{ file_path?: string }>('getFile', {
-      file_id: fileId,
-    });
-    if (!file.file_path) {
-      throw new YandexMessengerApiError(
-        'Telegram Bot API getFile: file_path is empty (файл больше 20 МБ?)',
-      );
-    }
-    try {
-      const response = await this.http.get<ArrayBuffer>(
-        `${this.apiUrl}/file/bot${this.token}/${file.file_path}`,
-        { responseType: 'arraybuffer', timeout: FILE_TIMEOUT_MS },
-      );
-      return Buffer.from(response.data);
-    } catch (error) {
-      throw this.toApiError(error, 'download file');
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const file = await this.request<{ file_path?: string }>('getFile', {
+          file_id: fileId,
+        });
+        if (!file.file_path) {
+          throw new YandexMessengerApiError(
+            'Telegram Bot API getFile: file_path is empty (файл больше 20 МБ?)',
+          );
+        }
+        const response = await this.http.get<ArrayBuffer>(
+          `${this.apiUrl}/file/bot${this.token}/${file.file_path}`,
+          { responseType: 'arraybuffer', timeout: FILE_TIMEOUT_MS },
+        );
+        return Buffer.from(response.data);
+      } catch (error) {
+        const apiError = this.toApiError(error, 'download file');
+        // Downloads are read-only, so timeouts can be retried safely.
+        // Keep the stricter sendDocument policy to avoid duplicate messages.
+        const retryable =
+          apiError instanceof YandexMessengerApiError &&
+          (apiError.status === undefined
+            ? Boolean(apiError.code)
+            : apiError.status >= 500);
+        if (attempt >= DOWNLOAD_FILE_ATTEMPTS || !retryable) {
+          throw apiError;
+        }
+        this.logger.warn(
+          `File download attempt ${attempt}/${DOWNLOAD_FILE_ATTEMPTS} failed, retrying`,
+        );
+        await this.sleep(DOWNLOAD_FILE_RETRY_DELAY_MS * attempt);
+      }
     }
   }
 

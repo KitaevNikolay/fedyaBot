@@ -2466,15 +2466,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } catch (downloadError) {
       this.logger.error(`downloadDocumentBuffer error: ${downloadError}`);
       await ctx.reply(
-        this.localesService.t('errors.docx_read_failed') ||
-          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+        this.localesService.t('errors.file_download_failed') ||
+          'Не удалось скачать файл из мессенджера. Подождите немного и отправьте файл ещё раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
       );
       return;
     }
     if (!buffer) {
       await ctx.reply(
-        this.localesService.t('errors.docx_read_failed') ||
-          'Не удалось прочитать файл. Попробуйте еще раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
+        this.localesService.t('errors.file_download_failed') ||
+          'Не удалось скачать файл из мессенджера. Подождите немного и отправьте файл ещё раз.\n/cancel — отменить и вернуться в меню работы со статьей.',
       );
       return;
     }
